@@ -1,0 +1,201 @@
+package smoke;
+
+import io.github.pasze888.kcptransport.kcp.KcpMetric;
+import io.github.pasze888.kcptransport.kcp.UkcpChannel;
+import io.github.pasze888.kcptransport.kcp.UkcpChannelOption;
+import io.github.pasze888.kcptransport.kcp.UkcpClientChannel;
+import io.github.pasze888.kcptransport.kcp.UkcpServerChannel;
+import io.netty.bootstrap.Bootstrap;
+import io.netty.bootstrap.ServerBootstrap;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelInitializer;
+import io.netty.channel.EventLoopGroup;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.handler.flow.FlowControlHandler;
+import net.minecraft.network.Varint21FrameDecoder;
+import net.minecraft.network.Varint21LengthFieldPrepender;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.net.InetSocketAddress;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * On-demand diagnostic for large KCP frames: where does the transfer stall, and what kills
+ * the channel? Prints bytes written, send queue left, peer ack point and transmission counters.
+ *
+ * <p>Deliberately NOT wired into {@code check}: past 127 fragments it closes channels on
+ * purpose, so it must never gate CI. Run it with the smoke classpath on JDK 25:
+ *
+ * <pre>
+ * java -cp "&lt;smoke runtime classpath&gt;" \
+ *      -Dprobe.sizes=100000,170000,174749,174750 -Dprobe.prime=true -Dprobe.waitMs=5000 \
+ *      smoke.BigFrameProbe
+ * </pre>
+ *
+ * <p>Findings live in the commit message and issue #3.
+ */
+public final class BigFrameProbe {
+
+    private static final int MTU = 1400;
+    private static final int MSS = MTU - 24;
+
+    public static void main(String[] args) throws Exception {
+        String[] sizesArg = System.getProperty("probe.sizes", "100000").split(",");
+        boolean prime = Boolean.getBoolean("probe.prime");
+        long waitMs = Long.getLong("probe.waitMs", 3000L);
+        System.out.println("[probe] MSS=" + MSS + " capAt128segs=" + (128 * MSS) + " prime=" + prime);
+
+        EventLoopGroup boss = new NioEventLoopGroup(1);
+        EventLoopGroup worker = new NioEventLoopGroup(1);
+        Channel server = null;
+        try {
+            server = startServer(boss, worker);
+            int port = ((InetSocketAddress) server.localAddress()).getPort();
+            System.out.println("[probe] server udp port " + port);
+            for (String s : sizesArg) {
+                runOne(worker, port, Integer.parseInt(s.trim()), prime, waitMs);
+            }
+        } finally {
+            if (server != null) server.close().awaitUninterruptibly(2000);
+            boss.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).awaitUninterruptibly(2000);
+            worker.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).awaitUninterruptibly(2000);
+            System.out.println("[probe] done");
+            System.out.flush();
+        }
+    }
+
+    private static Channel startServer(EventLoopGroup boss, EventLoopGroup worker) throws Exception {
+        ServerBootstrap sb = new ServerBootstrap();
+        sb.group(boss, worker).channel(UkcpServerChannel.class)
+          .childOption(UkcpChannelOption.UKCP_NODELAY, true)
+          .childOption(UkcpChannelOption.UKCP_INTERVAL, 10)
+          .childOption(UkcpChannelOption.UKCP_FAST_RESEND, 2)
+          .childOption(UkcpChannelOption.UKCP_NOCWND, true)
+          .childOption(UkcpChannelOption.UKCP_MTU, MTU)
+          .childOption(UkcpChannelOption.UKCP_SND_WND, 1024)
+          .childOption(UkcpChannelOption.UKCP_RCV_WND, 1024)
+          .childHandler(new ChannelInitializer<UkcpChannel>() {
+              @Override protected void initChannel(UkcpChannel ch) {
+                  ch.pipeline()
+                    .addLast("watch", watcher("server-child"))
+                    .addLast("splitter", new Varint21FrameDecoder(null))
+                    .addLast("flow", new FlowControlHandler())
+                    .addLast("prepender", new Varint21LengthFieldPrepender())
+                    .addLast("echo", new ChannelInboundHandlerAdapter() {
+                        @Override public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                            ctx.writeAndFlush(msg);
+                        }
+                    });
+              }
+          });
+        return sb.bind("127.0.0.1", 0).sync().channel();
+    }
+
+    private static ChannelInboundHandlerAdapter watcher(final String who) {
+        return new ChannelInboundHandlerAdapter() {
+            @Override public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+                System.out.println("[probe]   " + who + " EXC " + cause);
+                ctx.fireExceptionCaught(cause);
+            }
+            @Override public void channelInactive(ChannelHandlerContext ctx) {
+                System.out.println("[probe]   " + who + " INACTIVE");
+                ctx.fireChannelInactive();
+            }
+        };
+    }
+
+    private static void runOne(EventLoopGroup worker, int port, int size, boolean prime, long waitMs)
+            throws Exception {
+        BlockingQueue<ByteBuf> inbox = new LinkedBlockingQueue<>();
+        Bootstrap cb = new Bootstrap();
+        cb.group(worker).channel(UkcpClientChannel.class)
+          .option(UkcpChannelOption.UKCP_NODELAY, true)
+          .option(UkcpChannelOption.UKCP_INTERVAL, 10)
+          .option(UkcpChannelOption.UKCP_FAST_RESEND, 2)
+          .option(UkcpChannelOption.UKCP_NOCWND, true)
+          .option(UkcpChannelOption.UKCP_MTU, MTU)
+          .option(UkcpChannelOption.UKCP_SND_WND, 1024)
+          .option(UkcpChannelOption.UKCP_RCV_WND, 1024)
+          .handler(new ChannelInitializer<UkcpChannel>() {
+              @Override protected void initChannel(UkcpChannel ch) {
+                  ch.pipeline()
+                    .addLast("watch", watcher("client"))
+                    .addLast("splitter", new Varint21FrameDecoder(null))
+                    .addLast("flow", new FlowControlHandler())
+                    .addLast("prepender", new Varint21LengthFieldPrepender())
+                    .addLast("collect", new ChannelInboundHandlerAdapter() {
+                        @Override public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                            inbox.add((ByteBuf) msg);
+                        }
+                    });
+              }
+          });
+        Channel client = cb.connect("127.0.0.1", port).sync().channel();
+        try {
+            if (prime) {
+                ByteBuf warm = Unpooled.wrappedBuffer("warmup".getBytes());
+                client.writeAndFlush(warm).awaitUninterruptibly(2000);
+                ByteBuf got = inbox.poll(2000, TimeUnit.MILLISECONDS);
+                System.out.println("[probe]   warmup echo=" + (got != null));
+                if (got != null) got.release();
+            }
+
+            byte[] payload = new byte[size];
+            for (int i = 0; i < size; i++) payload[i] = (byte) (i * 31 + 7);
+            int segs = (size + 3 + MSS - 1) / MSS;
+
+            long t0 = System.nanoTime();
+            boolean writeDone = client.writeAndFlush(Unpooled.wrappedBuffer(payload))
+                    .awaitUninterruptibly(waitMs);
+            System.out.println("[probe] size=" + size + " segs=" + segs
+                    + " writeSettled=" + writeDone + " after=" + ms(t0) + "ms"
+                    + " | " + snapshot(client));
+
+            ByteBuf got = inbox.poll(waitMs, TimeUnit.MILLISECONDS);
+            System.out.println("[probe]   echoed=" + (got != null)
+                    + " elapsed=" + ms(t0) + "ms active=" + client.isActive()
+                    + " | " + snapshot(client)
+                    + (got != null ? " echoedBytes=" + got.readableBytes() : ""));
+            if (got != null) got.release();
+        } finally {
+            client.close().awaitUninterruptibly(1000);
+        }
+    }
+
+    private static long ms(long t0) {
+        return (System.nanoTime() - t0) / 1_000_000;
+    }
+
+    private static Object kcpOf(Channel ch) {
+        try {
+            Field uf = ch.getClass().getDeclaredField("ukcp");
+            uf.setAccessible(true);
+            Object ukcp = uf.get(ch);
+            Field kf = ukcp.getClass().getDeclaredField("kcp");
+            kf.setAccessible(true);
+            return kf.get(ukcp);
+        } catch (ReflectiveOperationException e) {
+            return null;
+        }
+    }
+
+    private static String snapshot(Channel ch) {
+        Object kcp = kcpOf(ch);
+        if (kcp == null) return "(no kcp)";
+        try {
+            KcpMetric m = new KcpMetric((io.github.pasze888.kcptransport.kcp.Kcp) kcp);
+            Method waitSnd = kcp.getClass().getMethod("waitSnd");
+            return String.format("waitSnd=%s sndUna=%d sndNxt=%d rcvNxt=%d xmit=%d maxSegXmit=%d",
+                    waitSnd.invoke(kcp), m.sndUna(), m.sndNxt(), m.rcvNxt(), m.xmit(), m.maxSegXmit());
+        } catch (Exception e) {
+            return "(metrics failed: " + e + ")";
+        }
+    }
+}
