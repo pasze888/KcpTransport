@@ -16,6 +16,8 @@ on:
       - '.gitignore'
   # pull_request 不加 paths 过滤：被过滤跳过的必需检查会停在 Pending，会卡住 PR 合并
   pull_request:
+  # 手动重跑入口：排障和补跑时不必为空提交发愁
+  workflow_dispatch:
 
 permissions:
   contents: read
