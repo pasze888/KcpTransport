@@ -42,3 +42,6 @@ repo/
 ### Runtime ###
 logs/
 !**/src/**/logs/
+
+### 本地工具 ###
+.dsh-meow/
