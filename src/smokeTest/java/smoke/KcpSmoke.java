@@ -1,6 +1,5 @@
 package smoke;
 
-import io.github.pasze888.kcptransport.kcp.ChannelOptionHelper;
 import io.github.pasze888.kcptransport.kcp.Ukcp;
 import io.github.pasze888.kcptransport.kcp.UkcpChannel;
 import io.github.pasze888.kcptransport.kcp.UkcpChannelOption;

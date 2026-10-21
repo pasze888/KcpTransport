@@ -10,8 +10,8 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.gen.Accessor;
 
 /**
- * Read access to the three private fields {@link KcpServerListenerBridge} needs, so the KCP
- * listener can join the same bookkeeping the TCP listener already drives.
+ * Read access to the three private fields the KCP listener needs, so it can join the same
+ * bookkeeping the TCP listener already drives.
  */
 @Mixin(ServerConnectionListener.class)
 public interface ServerConnectionListenerAccess {

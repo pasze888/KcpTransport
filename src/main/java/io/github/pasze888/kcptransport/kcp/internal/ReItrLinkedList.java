@@ -19,6 +19,7 @@ import java.util.Queue;
  *
  * @author <a href="mailto:szhnet@gmail.com">szh</a>
  */
+// KcpTransport: implements Queue, not Deque; JDK 21+ SequencedCollection.reversed() return-type clash breaks the build under Deque.
 public class ReItrLinkedList<E> extends AbstractSequentialList<E>
         implements List<E>, Queue<E>, Cloneable, java.io.Serializable {
 
