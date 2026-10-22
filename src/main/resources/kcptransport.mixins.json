@@ -7,7 +7,10 @@
     "ServerConnectionListenerAccess",
     "ServerConnectionListenerKcpMixin"
   ],
-  "client": [],
+  "client": [
+    "ConnectScreenKcpMixin",
+    "ServerNameResolverKcpMixin"
+  ],
   "injectors": {
     "defaultRequire": 1
   }

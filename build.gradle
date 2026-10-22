@@ -132,9 +132,27 @@ tasks.register('smokeKcp', JavaExec) {
     timeout = Duration.ofSeconds(90)
 }
 
-// 挂进 check。不挂的话 `gradlew build`（CI 就是这么跑的）永远不会执行它，绿勾只证明编译通过。
+// 前缀剥离是纯函数，不需要网络，单开一个任务让它独立可跑、失败可归因。
+tasks.register('smokeAddressPrefix', JavaExec) {
+    group = 'verification'
+    description = 'Smoke test: kcp; prefix parsing (strip, flag, malformed input)'
+    classpath = sourceSets.smokeTest.runtimeClasspath
+    mainClass = 'smoke.AddressPrefixSmoke'
+    timeout = Duration.ofSeconds(60)
+}
+
+// 客户端 bootstrap 必须把调用方给的 Connection 绑到 channel 上，否则首次发包 NPE。
+tasks.register('smokeClientConnection', JavaExec) {
+    group = 'verification'
+    description = 'Smoke test: client bootstrap binds the Connection it is given'
+    classpath = sourceSets.smokeTest.runtimeClasspath
+    mainClass = 'smoke.ClientConnectionSmoke'
+    timeout = Duration.ofSeconds(60)
+}
+
+// 挂进 check。不挂的话 `gradlew build`（CI 就是这么跑的）永远不会执行它们，绿勾只证明编译通过。
 tasks.named('check') {
-    dependsOn 'smokeKcp'
+    dependsOn 'smokeKcp', 'smokeAddressPrefix', 'smokeClientConnection'
 }
 
 dependencies {

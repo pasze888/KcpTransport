@@ -74,4 +74,23 @@ public final class ConnectionPipeline {
         connection.configurePacketHandler(pipeline);
         return connection;
     }
+
+    /**
+     * Installs the full vanilla stack on a {@link Connection} that already exists.
+     *
+     * <p>This is the client shape: {@code ConnectScreen} creates the {@link Connection} itself and
+     * then sends the handshake through that very object, so the pipeline has to bind it rather
+     * than build another one. A fresh Connection would stay off the channel and the first send
+     * would throw. Mirrors vanilla {@code Connection$1.initChannel} minus the TCP-only socket
+     * option.
+     *
+     * <p>The read timeout is the knob that bounds a KCP connection to a peer that is not there:
+     * UDP has no refusal signal, so nothing happens until this fires.
+     */
+    public static void configure(ChannelPipeline pipeline, PacketFlow flow, Connection connection) {
+        pipeline.addLast("timeout", new ReadTimeoutHandler(
+                Integer.getInteger("kcptransport.readTimeout", READ_TIMEOUT)));
+        Connection.configureSerialization(pipeline, flow, false, null);
+        connection.configurePacketHandler(pipeline);
+    }
 }
