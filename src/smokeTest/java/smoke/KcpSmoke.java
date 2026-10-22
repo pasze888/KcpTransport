@@ -1,5 +1,6 @@
 package smoke;
 
+import io.github.pasze888.kcptransport.ConnectionPipeline;
 import io.github.pasze888.kcptransport.kcp.Ukcp;
 import io.github.pasze888.kcptransport.kcp.UkcpChannel;
 import io.github.pasze888.kcptransport.kcp.UkcpChannelOption;
@@ -15,9 +16,7 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.handler.flow.FlowControlHandler;
-import net.minecraft.network.Varint21FrameDecoder;
-import net.minecraft.network.Varint21LengthFieldPrepender;
+import net.minecraft.network.protocol.PacketFlow;
 
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -74,10 +73,9 @@ public final class KcpSmoke {
               .childHandler(new ChannelInitializer<UkcpChannel>() {
                   @Override
                   protected void initChannel(UkcpChannel ch) {
+                      // The same framing module the server listener uses, not a hand-rolled copy.
+                      ConnectionPipeline.configureFraming(ch.pipeline(), PacketFlow.SERVERBOUND);
                       ch.pipeline()
-                        .addLast("splitter", new Varint21FrameDecoder(null))
-                        .addLast("flow", new FlowControlHandler())
-                        .addLast("prepender", new Varint21LengthFieldPrepender())
                         .addLast("echo", new ChannelInboundHandlerAdapter() {
                             @Override
                             public void channelRead(ChannelHandlerContext ctx, Object msg) {
@@ -248,10 +246,8 @@ public final class KcpSmoke {
           .handler(new ChannelInitializer<UkcpChannel>() {
               @Override
               protected void initChannel(UkcpChannel ch) {
+                  ConnectionPipeline.configureFraming(ch.pipeline(), PacketFlow.CLIENTBOUND);
                   ch.pipeline()
-                    .addLast("splitter", new Varint21FrameDecoder(null))
-                    .addLast("flow", new FlowControlHandler())
-                    .addLast("prepender", new Varint21LengthFieldPrepender())
                     .addLast("collect", new ChannelInboundHandlerAdapter() {
                         @Override
                         public void channelRead(ChannelHandlerContext ctx, Object msg) {

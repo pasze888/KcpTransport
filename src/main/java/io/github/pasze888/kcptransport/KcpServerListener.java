@@ -7,17 +7,14 @@ import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
-import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.util.concurrent.DefaultThreadFactory;
-import io.netty.handler.timeout.ReadTimeoutHandler;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.Queue;
 import net.minecraft.network.Connection;
-import net.minecraft.network.RateKickingConnection;
 import net.minecraft.network.protocol.PacketFlow;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerConnectionListener;
@@ -27,15 +24,13 @@ import org.jspecify.annotations.Nullable;
 /**
  * Brings up a KCP (UDP) listener next to the vanilla TCP one.
  *
- * <p>Everything above the byte-stream channel is reused verbatim: the child pipeline is built
- * with the same {@link Connection#configureSerialization} call the TCP bootstrap uses, which
- * the smoke test proves works unmodified on a KCP channel. Conversation routing by conv is
- * handled by {@link UkcpServerChannel} itself, so there is no per-connection bookkeeping here.
+ * <p>Everything above the byte-stream channel is reused verbatim: the child pipeline is wired by
+ * {@link ConnectionPipeline}, the same module the client path and the smoke test use. The only
+ * server-specific part is the handshake listener attached afterwards. Conversation routing by
+ * conv is handled by {@link UkcpServerChannel} itself, so there is no per-connection bookkeeping
+ * here.
  */
 public final class KcpServerListener {
-
-    /** Same knob as vanilla: -Dneoforge.readTimeout, default 30 seconds. */
-    private static final int READ_TIMEOUT = Integer.getInteger("neoforge.readTimeout", 30);
 
     /**
      * kcp-netty channels require a {@code NioEventLoop} (their isCompatible check), which MC's
@@ -99,16 +94,10 @@ public final class KcpServerListener {
     }
 
     private static void initChannel(Channel channel, MinecraftServer server, Queue<Connection> pendingConnections) {
-        ChannelPipeline pipeline = channel.pipeline().addLast("timeout", new ReadTimeoutHandler(READ_TIMEOUT));
-        // The vanilla serialization stack, byte for byte, with no adapter in front of it.
-        Connection.configureSerialization(pipeline, PacketFlow.SERVERBOUND, false, null);
-        int rateLimitPacketsPerSecond = server.getRateLimitPacketsPerSecond();
-        Connection connection = rateLimitPacketsPerSecond > 0
-                ? new RateKickingConnection(rateLimitPacketsPerSecond)
-                : new Connection(PacketFlow.SERVERBOUND);
-        // Same hand-off queue the TCP bootstrap feeds; ServerConnectionListener.tick() adopts it.
-        pendingConnections.add(connection);
-        connection.configurePacketHandler(pipeline);
+        // Vanilla stack, wired by the same module the client path and the smoke test use.
+        // Only the listener differs between the two sides.
+        Connection connection = ConnectionPipeline.configure(
+                channel.pipeline(), PacketFlow.SERVERBOUND, server, pendingConnections);
         connection.setListenerForServerboundHandshake(new ServerHandshakePacketListenerImpl(server, connection));
     }
 }

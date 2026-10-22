@@ -1,5 +1,6 @@
 package smoke;
 
+import io.github.pasze888.kcptransport.ConnectionPipeline;
 import io.github.pasze888.kcptransport.kcp.KcpMetric;
 import io.github.pasze888.kcptransport.kcp.UkcpChannel;
 import io.github.pasze888.kcptransport.kcp.UkcpChannelOption;
@@ -15,9 +16,7 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.handler.flow.FlowControlHandler;
-import net.minecraft.network.Varint21FrameDecoder;
-import net.minecraft.network.Varint21LengthFieldPrepender;
+import net.minecraft.network.protocol.PacketFlow;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -83,11 +82,9 @@ public final class BigFrameProbe {
           .childOption(UkcpChannelOption.UKCP_RCV_WND, 1024)
           .childHandler(new ChannelInitializer<UkcpChannel>() {
               @Override protected void initChannel(UkcpChannel ch) {
+                  ch.pipeline().addLast("watch", watcher("server-child"));
+                  ConnectionPipeline.configureFraming(ch.pipeline(), PacketFlow.SERVERBOUND);
                   ch.pipeline()
-                    .addLast("watch", watcher("server-child"))
-                    .addLast("splitter", new Varint21FrameDecoder(null))
-                    .addLast("flow", new FlowControlHandler())
-                    .addLast("prepender", new Varint21LengthFieldPrepender())
                     .addLast("echo", new ChannelInboundHandlerAdapter() {
                         @Override public void channelRead(ChannelHandlerContext ctx, Object msg) {
                             ctx.writeAndFlush(msg);
@@ -125,11 +122,9 @@ public final class BigFrameProbe {
           .option(UkcpChannelOption.UKCP_RCV_WND, 1024)
           .handler(new ChannelInitializer<UkcpChannel>() {
               @Override protected void initChannel(UkcpChannel ch) {
+                  ch.pipeline().addLast("watch", watcher("client"));
+                  ConnectionPipeline.configureFraming(ch.pipeline(), PacketFlow.CLIENTBOUND);
                   ch.pipeline()
-                    .addLast("watch", watcher("client"))
-                    .addLast("splitter", new Varint21FrameDecoder(null))
-                    .addLast("flow", new FlowControlHandler())
-                    .addLast("prepender", new Varint21LengthFieldPrepender())
                     .addLast("collect", new ChannelInboundHandlerAdapter() {
                         @Override public void channelRead(ChannelHandlerContext ctx, Object msg) {
                             inbox.add((ByteBuf) msg);
