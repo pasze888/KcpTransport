@@ -41,7 +41,7 @@ public final class KcpServerListener {
      * would keep the JVM alive after a server stop that does not force System.exit.
      */
     private static final EventLoopGroup KCP_GROUP =
-            new NioEventLoopGroup(0, new DefaultThreadFactory("kcptransport-IO", true));
+            new NioEventLoopGroup(1, new DefaultThreadFactory("kcptransport-IO", true));
 
     private KcpServerListener() {
     }

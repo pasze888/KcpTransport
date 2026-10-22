@@ -32,7 +32,7 @@ public final class KcpClientBootstrap {
      * including the daemon threads: this group is static and never shut down.
      */
     private static final EventLoopGroup KCP_GROUP =
-            new NioEventLoopGroup(0, new DefaultThreadFactory("kcptransport-client-IO", true));
+            new NioEventLoopGroup(1, new DefaultThreadFactory("kcptransport-client-IO", true));
 
     private static final boolean NODELAY = Boolean.parseBoolean(System.getProperty("kcptransport.nodelay", "true"));
     private static final int INTERVAL = Integer.getInteger("kcptransport.interval", 10);
