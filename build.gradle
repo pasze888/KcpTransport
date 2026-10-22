@@ -150,9 +150,18 @@ tasks.register('smokeClientConnection', JavaExec) {
     timeout = Duration.ofSeconds(60)
 }
 
+// 并发契约：服务端组必须单线程（kcp-netty 零锁，见 issue #10），且多连接复用不串扰。
+tasks.register('smokeConcurrency', JavaExec) {
+    group = 'verification'
+    description = 'Smoke test: single-threaded KCP event loop invariant and 3 concurrent sessions'
+    classpath = sourceSets.smokeTest.runtimeClasspath
+    mainClass = 'smoke.KcpConcurrencySmoke'
+    timeout = Duration.ofSeconds(90)
+}
+
 // 挂进 check。不挂的话 `gradlew build`（CI 就是这么跑的）永远不会执行它们，绿勾只证明编译通过。
 tasks.named('check') {
-    dependsOn 'smokeKcp', 'smokeAddressPrefix', 'smokeClientConnection'
+    dependsOn 'smokeKcp', 'smokeAddressPrefix', 'smokeClientConnection', 'smokeConcurrency'
 }
 
 dependencies {

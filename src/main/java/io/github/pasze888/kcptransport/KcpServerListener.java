@@ -39,6 +39,14 @@ public final class KcpServerListener {
      * So KCP runs on its own NIO group instead of reusing the vanilla one. Daemon threads
      * matter here: the group is static and never shut down, and non-daemon Netty threads
      * would keep the JVM alive after a server stop that does not force System.exit.
+     *
+     * <p><b>The thread count must stay 1.</b> kcp-netty holds no locks anywhere and expects a
+     * server channel and its children to share one event loop: inbound {@code kcpInput}, the
+     * scheduled {@code kcpUpdate}, and the pipeline dispatch into each child all run on the
+     * server channel's loop, while only a child's {@code doWrite} runs on the child's own loop.
+     * A multi-threaded group therefore lets two threads mutate one {@code Kcp} and connections
+     * die with {@code ConcurrentModificationException} during configuration. Upstream's own
+     * echo example uses a multi-threaded group, so copying it is not a defence. See issue #10.
      */
     private static final EventLoopGroup KCP_GROUP =
             new NioEventLoopGroup(1, new DefaultThreadFactory("kcptransport-IO", true));
