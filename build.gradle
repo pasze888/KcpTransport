@@ -159,9 +159,30 @@ tasks.register('smokeConcurrency', JavaExec) {
     timeout = Duration.ofSeconds(90)
 }
 
+// 端到端正向用例：真握手包经共享管道模块在 KCP 上往返，同一端口号 TCP 也独立握手（#6）。
+tasks.register('smokeHandshake', JavaExec) {
+    group = 'verification'
+    description = 'Smoke test: a real MC handshake round-trips over KCP and over TCP on one port'
+    classpath = sourceSets.smokeTest.runtimeClasspath
+    mainClass = 'smoke.HandshakeSmoke'
+    // 两条握手各有 10s 收包上限，加上双栈启动，最坏约 30s；timeout 只防挂死。
+    timeout = Duration.ofSeconds(90)
+}
+
+// 端到端失败语义：对端没有 KCP 监听时在超时护栏内收场，且不影响同地址的 TCP 路径（#6）。
+tasks.register('smokeFailureSemantics', JavaExec) {
+    group = 'verification'
+    description = 'Smoke test: a dead KCP peer fails inside the read-timeout guard, TCP unaffected'
+    classpath = sourceSets.smokeTest.runtimeClasspath
+    mainClass = 'smoke.FailureSemanticsSmoke'
+    // 用例自身最坏 ≈ 15s 护栏 + 10s 收包上限，timeout 只防挂死。
+    timeout = Duration.ofSeconds(90)
+}
+
 // 挂进 check。不挂的话 `gradlew build`（CI 就是这么跑的）永远不会执行它们，绿勾只证明编译通过。
 tasks.named('check') {
-    dependsOn 'smokeKcp', 'smokeAddressPrefix', 'smokeClientConnection', 'smokeConcurrency'
+    dependsOn 'smokeKcp', 'smokeAddressPrefix', 'smokeClientConnection', 'smokeConcurrency',
+            'smokeHandshake', 'smokeFailureSemantics'
 }
 
 dependencies {
