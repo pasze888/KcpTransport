@@ -24,8 +24,10 @@ import org.jspecify.annotations.Nullable;
  * ({@link Varint21FrameDecoder}), a {@link FlowControlHandler}, then {@code prepender}
  * ({@link Varint21LengthFieldPrepender}). It is exactly what
  * {@link Connection#configureSerialization} installs before its packet codecs, so a channel
- * built from it speaks the same framing the real connections do. That is the level the smoke
- * test exercises: raw bytes in, raw bytes out, no packet codec in the way.
+ * built from it speaks the same framing the real connections do. The framing-only smokes exercise
+ * that level: raw bytes in, raw bytes out, no packet codec in the way. The end-to-end smokes
+ * ({@code HandshakeSmoke}, {@code FailureSemanticsSmoke}) go through {@link #configure} instead and
+ * round-trip a real packet, so both levels are covered.
  *
  * <p>{@link #configure} is the full stack for real connections: read timeout, the vanilla
  * serialization stack, a {@link Connection} fed into the listener's hand-off queue, and the
