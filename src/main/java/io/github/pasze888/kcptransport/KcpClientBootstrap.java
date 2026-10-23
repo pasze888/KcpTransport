@@ -7,7 +7,8 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import java.net.InetSocketAddress;
 import net.minecraft.network.Connection;
@@ -27,12 +28,12 @@ import net.minecraft.server.network.EventLoopGroupHolder;
 public final class KcpClientBootstrap {
 
     /**
-     * kcp-netty channels need a {@code NioEventLoop} (their isCompatible check), which the
-     * holder MC hands us does not provide on Netty 4.2. Same reasoning as the server listener,
-     * including the daemon threads: this group is static and never shut down.
+     * A private group, not the one MC hands in: KCP stays on a single thread (issue #10) and its
+     * lifetime is independent of the server. Daemon threads, because this group is static and
+     * never shut down. Same reasoning as {@code KcpServerListener}.
      */
-    private static final EventLoopGroup KCP_GROUP =
-            new NioEventLoopGroup(1, new DefaultThreadFactory("kcptransport-client-IO", true));
+    private static final EventLoopGroup KCP_GROUP = new MultiThreadIoEventLoopGroup(
+            1, new DefaultThreadFactory("kcptransport-client-IO", true), NioIoHandler.newFactory());
 
     private static final boolean NODELAY = Boolean.parseBoolean(System.getProperty("kcptransport.nodelay", "true"));
     private static final int INTERVAL = Integer.getInteger("kcptransport.interval", 10);
@@ -48,7 +49,7 @@ public final class KcpClientBootstrap {
     /**
      * Connects {@code address} over KCP and returns the future the caller would have got from
      * vanilla. {@code holder} is accepted for signature parity but deliberately unused: KCP
-     * cannot run on the event loop MC hands out here.
+     * keeps its own single-threaded group instead of borrowing MC's.
      */
     public static ChannelFuture connect(InetSocketAddress address, EventLoopGroupHolder holder,
                                         Connection connection) {

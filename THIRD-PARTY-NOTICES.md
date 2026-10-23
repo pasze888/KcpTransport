@@ -11,7 +11,12 @@ This mod bundles source code derived from the following projects.
 - Modifications: package renamed; recompiled against Netty 4.2.x; `io.netty.bootstrap.UkcpServerBootstrap`
   and `UkcpServerBootstrapConfig` dropped (they occupy Netty's own package namespace);
   `ReItrLinkedList` changed to implement `Queue` instead of `Deque` to compile on JDK 21+
-  (SequencedCollection `reversed()` return-type conflict).
+  (SequencedCollection `reversed()` return-type conflict);
+  `isCompatible` relaxed from `NioEventLoop` to `IoEventLoop` in `UkcpServerChildChannel` and
+  `UkcpClientChannel`. Upstream requires the concrete 4.1-era loop class, which on Netty 4.2 only
+  the deprecated `NioEventLoopGroup` compatibility path produces; the interfaces are the same one
+  (`IoEventLoop extends EventLoop`), so the channels now register on
+  `MultiThreadIoEventLoopGroup` + `NioIoHandler` like any 4.2 channel (issue #11).
 
 ### Behaviour changes from the upstream library
 

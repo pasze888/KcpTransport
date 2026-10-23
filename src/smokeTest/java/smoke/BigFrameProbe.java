@@ -15,7 +15,8 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import net.minecraft.network.protocol.PacketFlow;
 
 import java.lang.reflect.Field;
@@ -51,8 +52,8 @@ public final class BigFrameProbe {
         long waitMs = Long.getLong("probe.waitMs", 3000L);
         System.out.println("[probe] MSS=" + MSS + " capAt128segs=" + (128 * MSS) + " prime=" + prime);
 
-        EventLoopGroup boss = new NioEventLoopGroup(1);
-        EventLoopGroup worker = new NioEventLoopGroup(1);
+        EventLoopGroup boss = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
+        EventLoopGroup worker = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         Channel server = null;
         try {
             server = startServer(boss, worker);

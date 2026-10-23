@@ -10,5 +10,5 @@ MC 26.3 自带 Netty 4.2.16，而 kcp-netty 1.5.2 的现成 jar 在该 Netty 上
 
 ## Consequences
 
-- 7930 行第三方代码进了仓，每次重内嵌都要对账：分叉点用可 grep 的 `// KcpTransport:` 单行 marker 标注（移植 5 处 + 行为分叉 2 处），散文写在 THIRD-PARTY-NOTICES.md。
+- 7930 行第三方代码进了仓，每次重内嵌都要对账：分叉点用可 grep 的 `// KcpTransport:` marker 标注，散文写在 THIRD-PARTY-NOTICES.md；处数随内嵌版本增长（2026-10-23 的 Netty 4.2 移植见 #11），以 `grep -rn "KcpTransport:" src/` 为准，不在文档里写死。
 - 上游 bug/安全修复不会自动到达我们，要手动搬。

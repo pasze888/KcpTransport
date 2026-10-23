@@ -22,7 +22,7 @@ import io.netty.channel.ChannelMetadata;
 import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoop;
-import io.netty.channel.nio.NioEventLoop;
+import io.netty.channel.IoEventLoop;
 import io.netty.util.internal.StringUtil;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
@@ -110,9 +110,14 @@ public final class UkcpClientChannel extends AbstractChannel implements UkcpChan
         return udpChannel.isActive();
     }
 
+    /**
+     * KcpTransport: the KCP channels run on Netty 4.2's IoHandle model, so any {@link IoEventLoop}
+     * will do; the old {@code NioEventLoop} requirement pinned them to the deprecated 4.1 compat
+     * path. See issue #11.
+     */
     @Override
     protected boolean isCompatible(EventLoop loop) {
-        return loop instanceof NioEventLoop;
+        return loop instanceof IoEventLoop;
     }
 
     @Override

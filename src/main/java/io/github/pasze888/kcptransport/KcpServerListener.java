@@ -8,7 +8,8 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -33,12 +34,14 @@ import org.jspecify.annotations.Nullable;
 public final class KcpServerListener {
 
     /**
-     * kcp-netty channels require a {@code NioEventLoop} (their isCompatible check), which MC's
-     * EventLoopGroupHolder does not provide: Netty 4.2 turns MultiThreadIoEventLoopGroup into
-     * SingleThreadIoEventLoop, and registering into it fails with "incompatible event loop type".
-     * So KCP runs on its own NIO group instead of reusing the vanilla one. Daemon threads
-     * matter here: the group is static and never shut down, and non-daemon Netty threads
-     * would keep the JVM alive after a server stop that does not force System.exit.
+     * A private group rather than the one MC hands out: KCP's lifetime must not be tied to a
+     * server or a world, and the single-threaded contract below is easier to hold when nothing
+     * else can register into it. Since the channels now accept any {@code IoEventLoop} (Netty
+     * 4.2's IoHandle model, issue #11), borrowing MC's group is possible, just not desirable
+     * while KCP is pinned to one thread.
+     *
+     * <p>Daemon threads matter here: the group is static and never shut down, and non-daemon
+     * Netty threads would keep the JVM alive after a server stop that does not force System.exit.
      *
      * <p><b>The thread count must stay 1.</b> kcp-netty holds no locks anywhere and expects a
      * server channel and its children to share one event loop: inbound {@code kcpInput}, the
@@ -48,8 +51,8 @@ public final class KcpServerListener {
      * die with {@code ConcurrentModificationException} during configuration. Upstream's own
      * echo example uses a multi-threaded group, so copying it is not a defence. See issue #10.
      */
-    private static final EventLoopGroup KCP_GROUP =
-            new NioEventLoopGroup(1, new DefaultThreadFactory("kcptransport-IO", true));
+    private static final EventLoopGroup KCP_GROUP = new MultiThreadIoEventLoopGroup(
+            1, new DefaultThreadFactory("kcptransport-IO", true), NioIoHandler.newFactory());
 
     private KcpServerListener() {
     }

@@ -14,7 +14,8 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.util.concurrent.MultithreadEventExecutorGroup;
 import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
@@ -69,8 +70,8 @@ public final class KcpConcurrencySmoke {
     }
 
     private static void assertConcurrentConnectionsStayIsolated() throws Exception {
-        EventLoopGroup boss = new NioEventLoopGroup(1);
-        EventLoopGroup worker = new NioEventLoopGroup(1);
+        EventLoopGroup boss = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
+        EventLoopGroup worker = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         Channel server = null;
         Channel[] clients = new Channel[CLIENTS];
         try {

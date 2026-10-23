@@ -17,7 +17,7 @@ import io.netty.channel.ChannelMetadata;
 import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoop;
-import io.netty.channel.nio.NioEventLoop;
+import io.netty.channel.IoEventLoop;
 import io.netty.util.internal.StringUtil;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
@@ -85,9 +85,14 @@ public final class UkcpServerChildChannel extends AbstractChannel implements Ukc
         return new UkcpServerChildUnsafe();
     }
 
+    /**
+     * KcpTransport: this is a logical channel with no socket of its own, so it only needs a loop
+     * that can drive a Netty 4.2 pipeline -- any {@link IoEventLoop}, not just the deprecated
+     * {@code NioEventLoop} of the 4.1 compatibility path. See issue #11.
+     */
     @Override
     protected boolean isCompatible(EventLoop loop) {
-        return loop instanceof NioEventLoop;
+        return loop instanceof IoEventLoop;
     }
 
     @Override
