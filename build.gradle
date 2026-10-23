@@ -179,10 +179,20 @@ tasks.register('smokeFailureSemantics', JavaExec) {
     timeout = Duration.ofSeconds(90)
 }
 
+// 内核自测：不经过 Netty 通道，直接驱动新底座的状态机（#13）。换底座期间它是唯一能单独
+// 跑红的行为兜底——通道层的冒烟要等到接线那两张票才有意义。
+tasks.register('smokeKernel', JavaExec) {
+    group = 'verification'
+    description = 'Smoke test: vendored java-kcp kernel round-trips, isolates convs, rejects junk'
+    classpath = sourceSets.smokeTest.runtimeClasspath
+    mainClass = 'smoke.KernelSmoke'
+    timeout = Duration.ofSeconds(90)
+}
+
 // 挂进 check。不挂的话 `gradlew build`（CI 就是这么跑的）永远不会执行它们，绿勾只证明编译通过。
 tasks.named('check') {
     dependsOn 'smokeKcp', 'smokeAddressPrefix', 'smokeClientConnection', 'smokeConcurrency',
-            'smokeHandshake', 'smokeFailureSemantics'
+            'smokeHandshake', 'smokeFailureSemantics', 'smokeKernel'
 }
 
 dependencies {
