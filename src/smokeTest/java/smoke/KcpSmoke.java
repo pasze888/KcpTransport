@@ -83,14 +83,19 @@ public final class KcpSmoke {
 
         malformedInputIsDropped();
 
-        EventLoopGroup boss = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
-        EventLoopGroup worker = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
+        // KcpTransport: one loop for the whole KCP endpoint, exactly like KcpServerListener
+        // (.group(KCP_GROUP) with a single thread). A session's kernel keeps reusable iterators and
+        // no locks, so the parent channel and every child must share one thread; splitting boss from
+        // worker here would let two threads drive one session (Kcp.release()/flush() then trip over
+        // each other). Issue #17 is where sessions get loops of their own, with the affinity that
+        // needs.
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         Channel server = null;
         Channel a = null;
         Channel b = null;
         try {
             ServerBootstrap sb = new ServerBootstrap();
-            sb.group(boss, worker)
+            sb.group(group)
               .channel(UkcpServerChannel.class)
               .childOption(UkcpChannelOption.UKCP_NODELAY, true)
               .childOption(UkcpChannelOption.UKCP_INTERVAL, 10)
@@ -122,8 +127,8 @@ public final class KcpSmoke {
             BlockingQueue<ByteBuf> inA = new LinkedBlockingQueue<>();
             BlockingQueue<ByteBuf> inB = new LinkedBlockingQueue<>();
 
-            a = connect(worker, port, inA);
-            b = connect(worker, port, inB);
+            a = connect(group, port, inA);
+            b = connect(group, port, inB);
 
             int convA = ((UkcpChannel) a).conv();
             int convB = ((UkcpChannel) b).conv();
@@ -167,8 +172,7 @@ public final class KcpSmoke {
             if (a != null) a.close().syncUninterruptibly();
             if (b != null) b.close().syncUninterruptibly();
             if (server != null) server.close().syncUninterruptibly();
-            boss.shutdownGracefully();
-            worker.shutdownGracefully();
+            group.shutdownGracefully();
             System.out.flush();
         }
     }
@@ -289,10 +293,10 @@ public final class KcpSmoke {
         }
     }
 
-    private static Channel connect(EventLoopGroup worker, int port, BlockingQueue<ByteBuf> inbox)
+    private static Channel connect(EventLoopGroup group, int port, BlockingQueue<ByteBuf> inbox)
             throws Exception {
         Bootstrap cb = new Bootstrap();
-        cb.group(worker)
+        cb.group(group)
           .channel(UkcpClientChannel.class)
           .option(UkcpChannelOption.UKCP_NODELAY, true)
           .option(UkcpChannelOption.UKCP_INTERVAL, 10)

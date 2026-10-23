@@ -51,28 +51,29 @@ public final class BigFrameProbe {
         long waitMs = Long.getLong("probe.waitMs", 3000L);
         System.out.println("[probe] MSS=" + MSS + " capAt128segs=" + (128 * MSS) + " prime=" + prime);
 
-        EventLoopGroup boss = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
-        EventLoopGroup worker = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
+        // KcpTransport: one loop, like the production listener. The kernel has no locks and keeps
+        // reusable iterators, so a session must be driven by one thread only (issue #17 is the
+        // ticket that lifts this with per-session affinity).
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         Channel server = null;
         try {
-            server = startServer(boss, worker);
+            server = startServer(group);
             int port = ((InetSocketAddress) server.localAddress()).getPort();
             System.out.println("[probe] server udp port " + port);
             for (String s : sizesArg) {
-                runOne(worker, port, Integer.parseInt(s.trim()), prime, waitMs);
+                runOne(group, port, Integer.parseInt(s.trim()), prime, waitMs);
             }
         } finally {
             if (server != null) server.close().awaitUninterruptibly(2000);
-            boss.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).awaitUninterruptibly(2000);
-            worker.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).awaitUninterruptibly(2000);
+            group.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).awaitUninterruptibly(2000);
             System.out.println("[probe] done");
             System.out.flush();
         }
     }
 
-    private static Channel startServer(EventLoopGroup boss, EventLoopGroup worker) throws Exception {
+    private static Channel startServer(EventLoopGroup group) throws Exception {
         ServerBootstrap sb = new ServerBootstrap();
-        sb.group(boss, worker).channel(UkcpServerChannel.class)
+        sb.group(group).channel(UkcpServerChannel.class)
           .childOption(UkcpChannelOption.UKCP_NODELAY, true)
           .childOption(UkcpChannelOption.UKCP_INTERVAL, 10)
           .childOption(UkcpChannelOption.UKCP_FAST_RESEND, 2)
@@ -108,11 +109,11 @@ public final class BigFrameProbe {
         };
     }
 
-    private static void runOne(EventLoopGroup worker, int port, int size, boolean prime, long waitMs)
+    private static void runOne(EventLoopGroup group, int port, int size, boolean prime, long waitMs)
             throws Exception {
         BlockingQueue<ByteBuf> inbox = new LinkedBlockingQueue<>();
         Bootstrap cb = new Bootstrap();
-        cb.group(worker).channel(UkcpClientChannel.class)
+        cb.group(group).channel(UkcpClientChannel.class)
           .option(UkcpChannelOption.UKCP_NODELAY, true)
           .option(UkcpChannelOption.UKCP_INTERVAL, 10)
           .option(UkcpChannelOption.UKCP_FAST_RESEND, 2)

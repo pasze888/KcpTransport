@@ -70,13 +70,15 @@ public final class KcpConcurrencySmoke {
     }
 
     private static void assertConcurrentConnectionsStayIsolated() throws Exception {
-        EventLoopGroup boss = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
-        EventLoopGroup worker = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
+        // KcpTransport: one loop for the KCP endpoint, matching KcpServerListener. The kernel has no
+        // locks and keeps reusable iterators, so the parent channel and its children must share one
+        // thread; taking parallelism from separate loops is issue #17's job (per-session affinity).
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         Channel server = null;
         Channel[] clients = new Channel[CLIENTS];
         try {
             ServerBootstrap sb = new ServerBootstrap();
-            sb.group(boss, worker)
+            sb.group(group)
               .channel(UkcpServerChannel.class)
               .childOption(UkcpChannelOption.UKCP_MTU, 1400)
               .childHandler(new ChannelInitializer<UkcpChannel>() {
@@ -99,7 +101,7 @@ public final class KcpConcurrencySmoke {
             BlockingQueue<ByteBuf>[] inboxes = new BlockingQueue[CLIENTS];
             for (int i = 0; i < CLIENTS; i++) {
                 inboxes[i] = new LinkedBlockingQueue<>();
-                clients[i] = connect(worker, port, inboxes[i]);
+                clients[i] = connect(group, port, inboxes[i]);
             }
 
             for (int round = 0; round < ROUNDS; round++) {
@@ -131,8 +133,7 @@ public final class KcpConcurrencySmoke {
             if (server != null) {
                 server.close().syncUninterruptibly();
             }
-            boss.shutdownGracefully();
-            worker.shutdownGracefully();
+            group.shutdownGracefully();
         }
     }
 
@@ -140,10 +141,10 @@ public final class KcpConcurrencySmoke {
         return Unpooled.copiedBuffer(text, StandardCharsets.UTF_8);
     }
 
-    private static Channel connect(EventLoopGroup worker, int port, BlockingQueue<ByteBuf> inbox)
+    private static Channel connect(EventLoopGroup group, int port, BlockingQueue<ByteBuf> inbox)
             throws Exception {
         Bootstrap cb = new Bootstrap();
-        cb.group(worker)
+        cb.group(group)
           .channel(UkcpClientChannel.class)
           .option(UkcpChannelOption.UKCP_MTU, 1400)
           .handler(new ChannelInitializer<UkcpChannel>() {

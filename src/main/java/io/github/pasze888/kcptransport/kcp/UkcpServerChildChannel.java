@@ -265,9 +265,16 @@ public final class UkcpServerChildChannel extends AbstractChannel
     public void out(ByteBuf data, IKcp kcp) {
         // kcp.base's ownership contract: the output takes the buffer, and whoever consumes it
         // releases it. UkcpPacket does that on deallocate, exactly as before.
-        Channel.Unsafe unsafe = parent().unsafe();
-        unsafe.write(UkcpPacket.newInstance(data, remoteAddress), unsafe.voidPromise());
-        unsafe.flush();
+        //
+        // KcpTransport: written through the parent's public outbound API, not through its Unsafe.
+        // A child and its parent can sit on different event loops (the smokes split boss from
+        // worker, and issue #17 will split per session on purpose), and Unsafe.write() mutates the
+        // parent's outbound buffer without any locking -- two loops doing that at once can leave
+        // the buffer in the state Netty refuses to close ("close() must be invoked after all
+        // flushed writes are handled"). Channel.writeAndFlush() is the thread-safe entry point:
+        // inline when already on the parent's loop, dispatched to it otherwise.
+        UkcpServerChannel parent = parent();
+        parent.writeAndFlush(UkcpPacket.newInstance(data, remoteAddress), parent.voidPromise());
     }
 
     final class UkcpServerChildUnsafe extends AbstractUnsafe {
