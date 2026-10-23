@@ -129,17 +129,13 @@ public class Ukcp {
 
     private void input(ByteBuf data, boolean regular, long current) throws IOException {
         int ret = kcp.input(data, regular, current);
-        switch (ret) {
-            case -1:
-                throw new IOException("No enough bytes of head");
-            case -2:
-                throw new IOException("No enough bytes of data");
-            case -3:
-                throw new IOException("Mismatch cmd");
-            case -4:
-                throw new IOException("Conv inconsistency");
-            default:
-                break;
+        // KcpTransport: negative codes mean "this datagram is not KCP for this session" (truncated
+        // header or body, bad command, another session's conv). Upstream throws, but ReadTask turns
+        // any throw into internalClose, so a port scan or a health check aimed at the UDP port would
+        // tear down live sessions. The C original drops the datagram and keeps the session; so do we
+        // (the same fork kcp-netty needed for its upstream issue #15).
+        if (ret < 0 && log.isDebugEnabled()) {
+            log.debug("Dropping malformed KCP datagram, ret={}, bytes={}", ret, data.readableBytes());
         }
     }
 
@@ -181,7 +177,9 @@ public class Ukcp {
      * @param curCanSend last state of canSend
      * @return {@code true} if the kcp can send more bytes
      */
-    protected boolean canSend(boolean curCanSend) {
+    // KcpTransport: widened from protected for the shells' driver loop, which retries a write the
+    // session had to refuse once the send window opens again.
+    public boolean canSend(boolean curCanSend) {
         int max = kcp.getSndWnd() * 2;
         int waitSnd = kcp.waitSnd();
         if (curCanSend) {
@@ -206,7 +204,9 @@ public class Ukcp {
         return nextTsUp;
     }
 
-    protected long flush(long current) {
+    // KcpTransport: widened from protected for the Netty shells in the parent package; the return
+    // value is the delay in milliseconds until the next flush.
+    public long flush(long current) {
         return kcp.flush(false, current);
     }
 
@@ -278,7 +278,9 @@ public class Ukcp {
         return fastFlush;
     }
 
-    protected void read(ByteBuf byteBuf) {
+    // KcpTransport: widened from protected for the shells, which drive the session from their own
+    // channel instead of subclassing the vendored class or reaching into it with reflection.
+    public void read(ByteBuf byteBuf) {
         if (controlReadBufferSize) {
             int readBufferSize = readBufferIncr.getAndUpdate(operand -> {
                 if (operand == 0) {
@@ -346,7 +348,8 @@ public class Ukcp {
         }
     }
 
-    protected long getTsUpdate() {
+    // KcpTransport: widened from protected for the shells' single driver loop.
+    public long getTsUpdate() {
         return tsUpdate;
     }
 
@@ -354,7 +357,8 @@ public class Ukcp {
         return readBuffer;
     }
 
-    protected Ukcp setTsUpdate(long tsUpdate) {
+    // KcpTransport: widened from protected for the shells' single driver loop.
+    public Ukcp setTsUpdate(long tsUpdate) {
         this.tsUpdate = tsUpdate;
         return this;
     }

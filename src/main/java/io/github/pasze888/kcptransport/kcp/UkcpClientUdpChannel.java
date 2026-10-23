@@ -14,9 +14,7 @@ import java.nio.channels.spi.SelectorProvider;
 import java.util.ArrayList;
 import java.util.List;
 
-import io.github.pasze888.kcptransport.kcp.internal.CodecOutputList;
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.ChannelConfig;
 import io.netty.channel.ChannelException;
 import io.netty.channel.ChannelMetadata;
@@ -24,7 +22,6 @@ import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.RecvByteBufAllocator;
 import io.netty.channel.nio.AbstractNioMessageChannel;
-import io.netty.util.ReferenceCountUtil;
 import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.SocketUtils;
 import io.netty.util.internal.StringUtil;
@@ -32,6 +29,13 @@ import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
 /**
+ * The UDP socket of a client channel. It owns the socket and nothing else: datagrams go straight
+ * into the session, which is where the state machine and the reassembly now live.
+ *
+ * <p>KcpTransport: the read loop used to drive kcp input and merge segments here. java-kcp's
+ * {@code kcp.base.Ukcp} does that in its own read task, so all this channel does is hand each
+ * datagram over.
+ *
  * @author <a href="mailto:szhnet@gmail.com">szh</a>
  */
 final class UkcpClientUdpChannel extends AbstractNioMessageChannel {
@@ -134,12 +138,6 @@ final class UkcpClientUdpChannel extends AbstractNioMessageChannel {
         try {
             javaChannel().connect(remoteAddress);
             success = true;
-
-            int current = Utils.milliSeconds(); // schedule update
-            int tsUp = ukcpChannel.kcpCheck(current);
-            ukcpChannel.kcpTsUpdate(tsUp);
-            ukcpChannel.scheduleUpdate(tsUp, current);
-
             return true;
         } finally {
             if (!success) {
@@ -161,9 +159,14 @@ final class UkcpClientUdpChannel extends AbstractNioMessageChannel {
     @Override
     protected void doClose() throws Exception {
         javaChannel().close();
-        if (!ukcpChannel.closeAnother) {
-            ukcpChannel.closeAnother = true;
-            ukcpChannel.unsafe().close(ukcpChannel.unsafe().voidPromise());
+        ukcpChannel.udpChannelClosed();
+    }
+
+    /** Closes just the socket; the owning channel is already on its way down. */
+    void closeFromOwner() {
+        if (isOpen()) {
+            Unsafe unsafe = unsafe();
+            unsafe.close(unsafe.voidPromise());
         }
     }
 
@@ -260,12 +263,12 @@ final class UkcpClientUdpChannel extends AbstractNioMessageChannel {
         public void read() {
             assert eventLoop().inEventLoop();
             final ChannelConfig config = config();
-            final ChannelPipeline pipeline = pipeline();
             final ChannelPipeline ukcpPipeline = ukcpChannel.pipeline();
             final RecvByteBufAllocator.Handle allocHandle = recvBufAllocHandle();
             allocHandle.reset(config);
 
             boolean closed = false;
+            boolean readAny = false;
             Throwable exception = null;
             try {
                 try {
@@ -285,72 +288,24 @@ final class UkcpClientUdpChannel extends AbstractNioMessageChannel {
                     exception = t;
                 }
 
-                Throwable exception1 = null;
                 int readBufSize = readBuf.size();
-                try {
-                    for (int i = 0; i < readBufSize; i++) {
-                        ByteBuf byteBuf = (ByteBuf) readBuf.get(i);
-
-                        ukcpChannel.kcpInput(byteBuf);
-                    }
-                    if (readBufSize > 0) {
-                        ukcpChannel.kcpTsUpdate(Utils.milliSeconds()); // update kcp
-                    }
-                } catch (Throwable t) {
-                    exception1 = t;
+                readAny = readBufSize > 0;
+                for (int i = 0; i < readBufSize; i++) {
+                    // The session takes the buffer over and releases it once it has fed the
+                    // kernel, so this loop must not release anything itself.
+                    ukcpChannel.kcpRead((ByteBuf) readBuf.get(i));
                 }
-
-                if (exception1 == null && ukcpChannel.kcpIsActive()) {
-                    boolean mergeSegmentBuf = ukcpChannel.config().isMergeSegmentBuf();
-                    CodecOutputList<ByteBuf> recvBufList = null;
-                    boolean recv = false;
-                    try {
-                        if (mergeSegmentBuf) {
-                            ByteBufAllocator allocator = config.getAllocator();
-                            int peekSize;
-                            while ((peekSize = ukcpChannel.kcpPeekSize()) >= 0) {
-                                recv = true;
-                                ByteBuf recvBuf = allocator.ioBuffer(peekSize);
-                                ukcpChannel.kcpReceive(recvBuf);
-
-                                ukcpPipeline.fireChannelRead(recvBuf);
-                            }
-                        } else {
-                            while (ukcpChannel.kcpCanRecv()) {
-                                recv = true;
-                                if (recvBufList == null) {
-                                    recvBufList = CodecOutputList.<ByteBuf>newInstance();
-                                }
-                                ukcpChannel.kcpReceive(recvBufList);
-                            }
-                        }
-                    } catch (Throwable t) {
-                        exception1 = t;
-                    }
-
-                    if (recv) {
-                        if (mergeSegmentBuf) {
-                            ukcpPipeline.fireChannelReadComplete();
-                        } else {
-                            Utils.fireChannelRead(ukcpChannel, recvBufList);
-                            recvBufList.recycle();
-                        }
-                    }
-                }
-
-                clearAndReleaseReadBuf();
+                readBuf.clear();
                 allocHandle.readComplete();
+
+                if (readAny) {
+                    ukcpPipeline.fireChannelReadComplete();
+                }
 
                 if (exception != null) {
                     closed = closeOnReadError(exception);
 
                     ukcpPipeline.fireExceptionCaught(exception);
-                }
-
-                if (exception1 != null) {
-                    closed = true;
-
-                    ukcpPipeline.fireExceptionCaught(exception1);
                 }
 
                 if (closed) {
@@ -371,16 +326,6 @@ final class UkcpClientUdpChannel extends AbstractNioMessageChannel {
                 }
             }
         }
-
-        private void clearAndReleaseReadBuf() {
-            int size = readBuf.size();
-            for (int i = 0; i < size; i++) {
-                Object msg = readBuf.get(i);
-                ReferenceCountUtil.release(msg);
-            }
-            readBuf.clear();
-        }
-
     }
 
 }

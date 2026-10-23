@@ -1,7 +1,6 @@
 package smoke;
 
 import io.github.pasze888.kcptransport.ConnectionPipeline;
-import io.github.pasze888.kcptransport.kcp.KcpMetric;
 import io.github.pasze888.kcptransport.kcp.UkcpChannel;
 import io.github.pasze888.kcptransport.kcp.UkcpChannelOption;
 import io.github.pasze888.kcptransport.kcp.UkcpClientChannel;
@@ -174,6 +173,10 @@ public final class BigFrameProbe {
             Field uf = ch.getClass().getDeclaredField("ukcp");
             uf.setAccessible(true);
             Object ukcp = uf.get(ch);
+            if (ukcp == null) {
+                // The session is built on first use, so a channel that never wrote has none yet.
+                return null;
+            }
             Field kf = ukcp.getClass().getDeclaredField("kcp");
             kf.setAccessible(true);
             return kf.get(ukcp);
@@ -186,12 +189,19 @@ public final class BigFrameProbe {
         Object kcp = kcpOf(ch);
         if (kcp == null) return "(no kcp)";
         try {
-            KcpMetric m = new KcpMetric((io.github.pasze888.kcptransport.kcp.Kcp) kcp);
             Method waitSnd = kcp.getClass().getMethod("waitSnd");
-            return String.format("waitSnd=%s sndUna=%d sndNxt=%d rcvNxt=%d xmit=%d maxSegXmit=%d",
-                    waitSnd.invoke(kcp), m.sndUna(), m.sndNxt(), m.rcvNxt(), m.xmit(), m.maxSegXmit());
+            return String.format("waitSnd=%s sndUna=%d sndNxt=%d rcvNxt=%d",
+                    waitSnd.invoke(kcp), counter(kcp, "sndUna"), counter(kcp, "sndNxt"),
+                    counter(kcp, "rcvNxt"));
         } catch (Exception e) {
             return "(metrics failed: " + e + ")";
         }
+    }
+
+    /** Reads one of the vendored kernel's private counters; it exposes no getters for these. */
+    private static long counter(Object kcp, String name) throws ReflectiveOperationException {
+        Field f = kcp.getClass().getDeclaredField(name);
+        f.setAccessible(true);
+        return ((Number) f.get(kcp)).longValue();
     }
 }

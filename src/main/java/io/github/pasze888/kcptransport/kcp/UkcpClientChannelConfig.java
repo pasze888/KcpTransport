@@ -18,25 +18,29 @@ import io.netty.channel.WriteBufferWaterMark;
  */
 public interface UkcpClientChannelConfig extends ChannelConfig, UkcpChannelConfig {
 
+    @Override
     UkcpClientChannelConfig setNodelay(boolean nodelay);
 
+    @Override
     UkcpClientChannelConfig setInterval(int interval);
 
+    @Override
     UkcpClientChannelConfig setFastResend(int resend);
 
+    @Override
     UkcpClientChannelConfig setNocwnd(boolean nc);
 
-    UkcpClientChannelConfig setMinRto(int minRto);
-
+    @Override
     UkcpClientChannelConfig setMtu(int mtu);
 
+    @Override
     UkcpClientChannelConfig setRcvWnd(int rcvWnd);
 
+    @Override
     UkcpClientChannelConfig setSndWnd(int sndWnd);
 
+    @Override
     UkcpClientChannelConfig setStream(boolean stream);
-
-    UkcpClientChannelConfig setDeadLink(int deadLink);
 
     /**
      * Gets the {@link StandardSocketOptions#SO_RCVBUF} option.

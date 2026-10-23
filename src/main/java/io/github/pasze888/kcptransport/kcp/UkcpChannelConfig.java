@@ -8,6 +8,15 @@ package io.github.pasze888.kcptransport.kcp;
 import io.netty.channel.ChannelConfig;
 
 /**
+ * The KCP knobs a channel exposes: one getter/setter pair per field of the vendored
+ * {@link io.github.pasze888.kcptransport.kcp.base.KcpConfig}.
+ *
+ * <p>KcpTransport: the kcp-netty-only knobs went away with that base. java-kcp has no
+ * {@code deadLink} (its check is commented out upstream), no {@code minRto} setter, no
+ * {@code fastLimit}, no {@code autoSetConv} (the server adopts the session number from the first
+ * datagram itself) and no {@code mergeSegmentBuf} (its session layer always merges in message
+ * mode).
+ *
  * @author <a href="mailto:szhnet@gmail.com">szh</a>
  */
 public interface UkcpChannelConfig extends ChannelConfig {
@@ -24,17 +33,9 @@ public interface UkcpChannelConfig extends ChannelConfig {
 
     UkcpChannelConfig setFastResend(int fastResend);
 
-    int getFastLimit();
-
-    UkcpChannelConfig setFastLimit(int fastLimit);
-
     boolean isNocwnd();
 
     UkcpChannelConfig setNocwnd(boolean nc);
-
-    int getMinRto();
-
-    UkcpChannelConfig setMinRto(int minRto);
 
     int getMtu();
 
@@ -52,20 +53,8 @@ public interface UkcpChannelConfig extends ChannelConfig {
 
     UkcpChannelConfig setStream(boolean stream);
 
-    int getDeadLink();
-
-    UkcpChannelConfig setDeadLink(int deadLink);
-
-    boolean isAutoSetConv();
-
-    UkcpChannelConfig setAutoSetConv(boolean autoSetConv);
-
     boolean isFastFlush();
 
     UkcpChannelConfig setFastFlush(boolean fastFlush);
-
-    boolean isMergeSegmentBuf();
-
-    UkcpChannelConfig setMergeSegmentBuf(boolean mergeSegmentBuf);
 
 }

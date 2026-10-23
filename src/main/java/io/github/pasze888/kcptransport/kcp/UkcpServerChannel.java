@@ -5,8 +5,6 @@
  */
 package io.github.pasze888.kcptransport.kcp;
 
-import static io.github.pasze888.kcptransport.kcp.Consts.sheduleUpdateLog;
-
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
@@ -16,16 +14,16 @@ import java.nio.channels.DatagramChannel;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.spi.SelectorProvider;
 import java.util.ArrayList;
-import java.util.Iterator;
+import java.util.Collection;
 import java.util.List;
-import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
-import io.github.pasze888.kcptransport.kcp.internal.CodecOutputList;
-import io.github.pasze888.kcptransport.kcp.internal.ReItrHashMap;
-import io.github.pasze888.kcptransport.kcp.internal.ReusableIterator;
+import io.github.pasze888.kcptransport.kcp.base.IChannelManager;
+import io.github.pasze888.kcptransport.kcp.base.Kcp;
+import io.github.pasze888.kcptransport.kcp.base.Ukcp;
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufAllocator;
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelConfig;
 import io.netty.channel.ChannelException;
 import io.netty.channel.ChannelMetadata;
@@ -42,9 +40,19 @@ import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
 /**
+ * The UDP listening channel. It owns the socket and the session table, and routes every datagram
+ * to the session that matches its remote address.
+ *
+ * <p>KcpTransport: the sessions are java-kcp's {@code kcp.base.Ukcp}, one per remote address. They
+ * do not run on a loop of their own yet (ADR-0008, issue #17): this channel's event loop ticks them
+ * through {@link #run()}, which is upstream's timer semantics (flush, then reschedule for the delay
+ * the flush asks for). Resolution is remote address, as before; the session number is still chosen
+ * by the client and adopted from its first datagram.
+ *
  * @author <a href="mailto:szhnet@gmail.com">szh</a>
  */
-public final class UkcpServerChannel extends AbstractNioMessageChannel implements ServerChannel, Runnable {
+public final class UkcpServerChannel extends AbstractNioMessageChannel
+        implements ServerChannel, Runnable, IChannelManager {
 
     private static final InternalLogger log = InternalLoggerFactory.getInstance(UkcpServerChannel.class);
 
@@ -54,31 +62,18 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel implement
     private static final String EXPECTED_TYPES =
             " (expected: " + StringUtil.simpleClassName(DatagramPacket.class) + ')';
 
+    /** Standard KCP header: conv is a little-endian int at offset 0, sn at 12. */
+    private static final int KCP_HEADER_SIZE = 24;
+    private static final int KCP_CONV_OFFSET = 0;
+
     private final DefaultUkcpServerChannelConfig config;
 
-    private final ReItrHashMap<SocketAddress, UkcpServerChildChannel> childChannelMap = new ReItrHashMap<>();
-
-    private final ReusableIterator<Map.Entry<SocketAddress, UkcpServerChildChannel>> childChannelMapItr =
-            childChannelMap.entrySet().iterator();
-
-    private final ReItrHashMap<SocketAddress, CloseWaitKcp> closeWaitKcpMap = new ReItrHashMap<>();
-
-    private final ReusableIterator<Map.Entry<SocketAddress, CloseWaitKcp>> closeWaitKcpMapItr =
-            closeWaitKcpMap.entrySet().iterator();
-
-    private final KcpOutput output = new UkcpServerOutput();
-
-    private int tsUpdate;
+    // KcpTransport: concurrent because #17 turns each session into its own loop and they remove
+    // themselves from this table from their own thread. On one loop it behaves like a plain map.
+    private final ConcurrentHashMap<SocketAddress, UkcpServerChildChannel> childChannelMap =
+            new ConcurrentHashMap<>();
 
     private boolean scheduleUpdate;
-
-    private boolean scheduleCloseWait = false;
-
-    private List<UkcpServerChildChannel> writeChannels = new ArrayList<>();
-
-    private List<Object> closeChildList = new ArrayList<>();
-
-    private Runnable closeWaitRunner = new CloseWaitRun();
 
     private static DatagramChannel newSocket(SelectorProvider provider) {
         try {
@@ -165,15 +160,9 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel implement
             exception = t;
         }
         // close child channel
-        // KcpTransport: snapshot first. Closing a child removes it from childChannelMap
-        // (doCloseChildChannel -> childChannelMap.remove), which corrupts a live iterator
-        // and made close() throw ConcurrentModificationException.
-        List<UkcpServerChildChannel> children = new ArrayList<>(childChannelMap.size());
-        for (Iterator<Map.Entry<SocketAddress, UkcpServerChildChannel>> itr = childChannelMapItr.rewind(); itr
-                .hasNext(); ) {
-            children.add(itr.next().getValue());
-        }
-        for (UkcpServerChildChannel childCh : children) {
+        // KcpTransport: every iteration removes the child from this table as it closes, which the
+        // concurrent map tolerates; the old shell had to snapshot into a list.
+        for (UkcpServerChildChannel childCh : childChannelMap.values()) {
             Unsafe childUnsafe = childCh.unsafe();
             try {
                 childUnsafe.close(childUnsafe.voidPromise());
@@ -304,230 +293,124 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel implement
         throw new UnsupportedOperationException();
     }
 
-    private UkcpServerChildChannel getOrCreateUkcpChannel(InetSocketAddress remoteAddress) {
-        UkcpServerChildChannel ch = childChannelMap.get(remoteAddress);
-        if (ch == null) {
-            ch = createChildChannel(remoteAddress);
-            childChannelMap.put(remoteAddress, ch);
-        }
-        return ch;
-    }
+    private UkcpServerChildChannel createChildChannel(InetSocketAddress remoteAddress, int conv) {
+        UkcpServerChildChannel ch = new UkcpServerChildChannel(this, remoteAddress, conv);
+        childChannelMap.put(remoteAddress, ch);
 
-    private UkcpServerChildChannel createChildChannel(InetSocketAddress remoteAddress) {
-        // KcpTransport: the child starts at conv 0 and must adopt the conv carried by the
-        // client's first segment. Without autoSetConv, Kcp#input rejects any non-zero conv
-        // with -4 and the session silently receives nothing.
-        Ukcp ukcp = new Ukcp(0, output);
-        ukcp.setAutoSetConv(true);
-        UkcpServerChildChannel ch = new UkcpServerChildChannel(this, ukcp, remoteAddress);
-
+        // Firing the child through this channel's pipeline is what the bootstrap's acceptor hangs
+        // off: it applies the child options (the session copies them when it is built) and
+        // registers the channel, which is what attaches the vanilla stack to it.
         ChannelPipeline pipeline = pipeline();
         pipeline.fireChannelRead(ch);
         pipeline.fireChannelReadComplete();
 
         if (log.isDebugEnabled()) {
-            log.debug("Create childChannel. remoteAddress={}", remoteAddress);
+            log.debug("Create childChannel. remoteAddress={}, conv={}", remoteAddress, conv);
         }
 
-        if (!this.scheduleUpdate) { // haven't schedule update
-            int current = Utils.milliSeconds();
-            int tsUp = ch.kcpCheck(current);
-            ch.kcpTsUpdate(tsUp);
-            scheduleUpdate(tsUp, current);
+        if (!scheduleUpdate) {
+            scheduleUpdate = true;
+            eventLoop().execute(this);
         }
 
         return ch;
     }
 
-    private void scheduleUpdate(int tsUpdate, int current) {
-        if (sheduleUpdateLog.isDebugEnabled()) {
-            sheduleUpdateLog.debug("schedule delay: " + (tsUpdate - current));
-        }
-        this.tsUpdate = tsUpdate;
-        this.scheduleUpdate = true;
-        eventLoop().schedule(this, tsUpdate - current, TimeUnit.MILLISECONDS);
+    void removeChild(UkcpServerChildChannel childChannel) {
+        childChannelMap.remove(childChannel.remoteAddress(), childChannel);
     }
 
-    void doCloseChildChannel(UkcpServerChildChannel childChannel) {
-        UkcpServerChildChannel rmCh = childChannelMap.remove(childChannel.remoteAddress());
-        if (rmCh == null) {
-            log.error("Not found childChannel. remoteAddress={}", childChannel.remoteAddress());
-        }
-        if (rmCh != childChannel) {
-            log.error("Mismatch instance of childChannel. remoteAddress={}", childChannel.remoteAddress());
-        }
-        Ukcp ukcp = childChannel.ukcp();
-        if (isActive() && ukcp.getState() != -1 && ukcp.checkFlush()) {
-            ukcp.setClosed(false);
-            int current = Utils.milliSeconds();
-            closeWaitKcpMap.put(ukcp.channel().remoteAddress(), new CloseWaitKcp(ukcp, current + Consts
-                    .CLOSE_WAIT_TIME));
-            tryScheduleCloseWait();
-            if (!scheduleUpdate) {
-                scheduleUpdate(ukcp.check(current), current); // schedule update
-            }
-        } else {
-            ukcp.setClosed(true);
-        }
-    }
-
-    private void tryScheduleCloseWait() {
-        if (closeWaitKcpMap.isEmpty() || scheduleCloseWait) {
-            return;
-        }
-        eventLoop().schedule(closeWaitRunner, Consts.CLOSE_WAIT_TIME / 2, TimeUnit.MILLISECONDS);
-        scheduleCloseWait = true;
-    }
-
+    /**
+     * Drives every session once: flush when its own timestamp is due, and retry a write that the
+     * session had no room for. Reschedules itself for the smallest delay any session asked for --
+     * the same shape as upstream's per-session {@code ScheduleTask}, collapsed into one timer
+     * because issue #17 (one loop per session) has not happened yet.
+     */
     @Override
     public void run() {
-        int current = Utils.milliSeconds();
-        int nextTsUpdate = 0;
-        boolean nextSchedule = false;
+        scheduleUpdate = false;
+        long current = System.currentTimeMillis();
+        long nextDelay = Long.MAX_VALUE;
 
-        for (Iterator<Map.Entry<SocketAddress, UkcpServerChildChannel>> itr = childChannelMapItr.rewind(); itr
-                .hasNext(); ) {
-            UkcpServerChildChannel childCh = itr.next().getValue();
+        for (UkcpServerChildChannel childCh : childChannelMap.values()) {
             if (!childCh.isActive()) {
                 continue;
             }
-            int tsUp = childCh.kcpTsUpdate();
-            int nextChildTsUp = 0;
-            boolean nextChildSchedule = false;
-            Throwable exception = null;
-            if (Utils.itimediff(current, tsUp) >= 0) {
-                try {
-                    nextChildTsUp = childCh.kcpUpdate(current);
-                    nextChildSchedule = true;
-                } catch (Throwable t) {
-                    exception = t;
-                }
-
-                boolean deadLink = false;
-                if (childCh.kcpState() == -1 && exception == null) {
-                    // KcpTransport: dead link is a normal end of session for UDP, close quietly.
-                    if (log.isDebugEnabled()) {
-                        log.debug("getState=-1 after update(). channel={}", childCh);
-                    }
-                    deadLink = true;
-                }
-
-                if (exception != null) {
-                    closeChildList.add(new ExceptionCloseWrapper(childCh, exception));
-                    nextChildTsUp = 0;
-                    nextChildSchedule = false;
-                } else if (deadLink) {
-                    closeChildList.add(childCh);
-                    nextChildTsUp = 0;
-                    nextChildSchedule = false;
-                } else {
-                    if (childCh.isFlushPending() && childCh.kcpCanSend()) {
-                        writeChannels.add(childCh);
-                    }
-                }
+            Ukcp ukcp = childCh.ukcp();
+            long tsUpdate = ukcp.getTsUpdate();
+            if (current >= tsUpdate) {
+                long next = ukcp.flush(current);
+                ukcp.setTsUpdate(current + next);
+                nextDelay = Math.min(nextDelay, next);
             } else {
-                nextChildTsUp = tsUp;
-                nextChildSchedule = true;
+                nextDelay = Math.min(nextDelay, tsUpdate - current);
             }
-            if (nextChildSchedule && (!nextSchedule || Utils.itimediff(nextTsUpdate, nextChildTsUp) > 0)) {
-                nextTsUpdate = nextChildTsUp;
-                nextSchedule = true;
-            }
-        }
-
-        if (writeChannels.size() > 0) {
-            for (UkcpServerChildChannel childCh : writeChannels) {
+            if (childCh.isFlushPending() && ukcp.canSend(false)) {
                 childCh.unsafe().forceFlush();
             }
-            writeChannels.clear();
         }
 
-        if (closeWaitKcpMap.size() > 0) {
-            for (Iterator<Map.Entry<SocketAddress, CloseWaitKcp>> itr = closeWaitKcpMapItr.rewind(); itr.hasNext(); ) {
-                CloseWaitKcp w = itr.next().getValue();
-                Ukcp ukcp = w.ukcp;
-
-                int tsUp = ukcp.getTsUpdate();
-                int nextChildTsUp = 0;
-                boolean nextChildSchedule = false;
-                Throwable exception = null;
-                if (Utils.itimediff(current, tsUp) >= 0) {
-                    try {
-                        nextChildTsUp = ukcp.update(current);
-                        nextChildSchedule = true;
-                    } catch (Throwable t) {
-                        exception = t;
-                        itr.remove();
-                        ukcp.setKcpClosed();
-                        log.error("Terminate closeWaitKcp. ukcp={}, cause={}", ukcp, "update error", t);
-                    }
-
-                    if (ukcp.getState() == -1 && exception == null) {
-                        itr.remove();
-                        ukcp.setKcpClosed();
-                        nextChildTsUp = 0;
-                        nextChildSchedule = false;
-                        if (log.isDebugEnabled()) {
-                            log.debug("Terminate closeWaitKcp. ukcp={}, cause={}", ukcp, "update -1");
-                        }
-                    }
-                } else {
-                    nextChildTsUp = tsUp;
-                    nextChildSchedule = true;
-                }
-                if (nextChildSchedule && (!nextSchedule || Utils.itimediff(nextTsUpdate, nextChildTsUp) > 0)) {
-                    nextTsUpdate = nextChildTsUp;
-                    nextSchedule = true;
-                }
-            }
-        }
-
-        tsUpdate = nextTsUpdate;
-        scheduleUpdate = nextSchedule;
-        if (nextSchedule) {
-            scheduleUpdate(tsUpdate, current);
-        }
-
-        if (closeChildList.size() > 0) {
-            handleCloseChildList();
+        if (nextDelay != Long.MAX_VALUE) {
+            scheduleUpdate = true;
+            eventLoop().schedule(this, Math.max(1L, nextDelay), TimeUnit.MILLISECONDS);
         }
     }
 
-    void updateChildKcp(UkcpServerChildChannel childCh) {
-        int current = Utils.milliSeconds();
-        Throwable exception = null;
-        try {
-            childCh.kcpUpdate(current);
-        } catch (Throwable t) {
-            exception = t;
-        }
+    /** Routes one datagram to its session, creating the session when this is its first one. */
+    private void dispatch(UkcpPacket packet) {
+        ByteBuf content = packet.content();
+        InetSocketAddress remoteAddress = packet.remoteAddress();
+        UkcpServerChildChannel childCh = childChannelMap.get(remoteAddress);
 
-        if (childCh.kcpState() == -1 && exception == null) {
-            // KcpTransport: dead link is a normal end of session for UDP, close quietly.
-            if (log.isDebugEnabled()) {
-                log.debug("getState=-1 after update(). channel={}", childCh);
+        if (childCh == null) {
+            // A new session has to start with a first segment (sn == 0); anything else from an
+            // unknown peer is somebody else's traffic or a probe. Its conv is adopted from this
+            // datagram: java-kcp has no autoSetConv, and its input() rejects a foreign conv.
+            if (content.readableBytes() < KCP_HEADER_SIZE
+                    || content.getIntLE(content.readerIndex() + Kcp.IKCP_SN_OFFSET) != 0) {
+                if (log.isDebugEnabled()) {
+                    log.debug("Dropping datagram from an unknown peer: not a first segment. remoteAddress={}",
+                            remoteAddress);
+                }
+                return;
             }
-            Utils.closeQuietly(childCh);
+            childCh = createChildChannel(remoteAddress, content.getIntLE(content.readerIndex() + KCP_CONV_OFFSET));
+        } else if (!childCh.isActive()) {
             return;
         }
 
-        if (exception != null) {
-            Utils.fireExceptionAndClose(childCh, exception, true);
-        }
+        // The session takes the buffer over (ReadTask releases it after feeding the kernel), so
+        // hand it a reference of its own and let UkcpPacket release its own in the caller.
+        childCh.ukcp().read(content.retain());
     }
 
-    private void handleCloseChildList() {
-        for (Object obj : closeChildList) {
-            if (obj instanceof UkcpServerChildChannel) {
-                UkcpServerChildChannel childCh = (UkcpServerChildChannel) obj;
-                Unsafe childUnsafe = childCh.unsafe();
-                childUnsafe.close(childUnsafe.voidPromise());
-            } else {
-                ExceptionCloseWrapper wrap = (ExceptionCloseWrapper) obj;
-                Utils.fireExceptionAndClose(wrap.channel, wrap.exception, true);
-            }
+    // ---- IChannelManager: the session layer's view of this table ------------------------------
+
+    @Override
+    public Ukcp get(DatagramPacket msg) {
+        UkcpServerChildChannel childCh = childChannelMap.get(msg.sender());
+        return childCh != null && childCh.isActive() ? childCh.ukcp() : null;
+    }
+
+    @Override
+    public void add(SocketAddress socketAddress, Ukcp ukcp, DatagramPacket msg) {
+        // The shell adds children itself in createChildChannel; java-kcp only calls this from its
+        // own server handler, which is not part of what we vendored.
+    }
+
+    @Override
+    public void del(Ukcp ukcp) {
+        // Also nothing to do: the child channel removes itself from the table in handleClose,
+        // before Ukcp.internalClose() gets here.
+    }
+
+    @Override
+    public Collection<Ukcp> getAll() {
+        List<Ukcp> all = new ArrayList<>(childChannelMap.size());
+        for (UkcpServerChildChannel childCh : childChannelMap.values()) {
+            all.add(childCh.ukcp());
         }
-        closeChildList.clear();
+        return all;
     }
 
     private final class UkcpServerUnsafe extends AbstractNioUnsafe {
@@ -564,94 +447,14 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel implement
 
                 int readBufSize = readBuf.size();
                 for (int i = 0; i < readBufSize; i++) {
-                    Throwable subException = null;
                     UkcpPacket packet = (UkcpPacket) readBuf.get(i);
-                    InetSocketAddress remoteAddress = packet.remoteAddress();
-                    ByteBuf byteBuf = packet.content();
-
-                    CloseWaitKcp closeWaitKcp = closeWaitKcpMap.get(remoteAddress);
-                    if (closeWaitKcp != null) {
-                        CodecOutputList<ByteBuf> recvBufList = null;
-                        Ukcp ukcp = closeWaitKcp.ukcp;
-                        try {
-                            ukcp.input(byteBuf);
-                            ukcp.setTsUpdate(Utils.milliSeconds()); // update kcp
-
-                            while (ukcp.canRecv()) {
-                                if (recvBufList == null) {
-                                    recvBufList = CodecOutputList.<ByteBuf>newInstance();
-                                }
-                                ukcp.receive(recvBufList);
-                            }
-                        } catch (Throwable t) {
-                            subException = t;
-                        } finally {
-                            packet.release();
-                        }
-                        if (recvBufList != null) {
-                            clearAndRelease(recvBufList);
-                            recvBufList.recycle();
-                        }
-
-                        if (subException != null) {
-                            closeWaitKcpMap.remove(remoteAddress);
-                            ukcp.setKcpClosed();
-                            log.error("Terminate closeWaitKcp. ukcp={}, cause={}", ukcp, "read error", subException);
-                        }
-                    } else {
-                        UkcpServerChildChannel childCh = getOrCreateUkcpChannel(remoteAddress);
-                        if (!childCh.isActive()) {
-                            packet.release();
-                            continue;
-                        }
-
-                        UkcpChannelConfig childConfig = childCh.config();
-                        ChannelPipeline childPipeline = childCh.pipeline();
-                        boolean mergeSegmentBuf = childConfig.isMergeSegmentBuf();
-                        CodecOutputList<ByteBuf> recvBufList = null;
-                        boolean recv = false;
-                        try {
-                            childCh.kcpInput(byteBuf);
-                            childCh.kcpTsUpdate(Utils.milliSeconds()); // update kcp
-
-                            if (mergeSegmentBuf) {
-                                ByteBufAllocator childAllocator = childConfig.getAllocator();
-
-                                int peekSize;
-                                while ((peekSize = childCh.kcpPeekSize()) >= 0) {
-                                    recv = true;
-                                    ByteBuf recvBuf = childAllocator.ioBuffer(peekSize);
-                                    childCh.kcpReceive(recvBuf);
-
-                                    childPipeline.fireChannelRead(recvBuf);
-                                }
-                            } else {
-                                while (childCh.kcpCanRecv()) {
-                                    recv = true;
-                                    if (recvBufList == null) {
-                                        recvBufList = CodecOutputList.<ByteBuf>newInstance();
-                                    }
-                                    childCh.kcpReceive(recvBufList);
-                                }
-                            }
-
-                        } catch (Throwable t) {
-                            subException = t;
-                        } finally {
-                            packet.release();
-                        }
-                        if (recv) {
-                            if (mergeSegmentBuf) {
-                                childPipeline.fireChannelReadComplete();
-                            } else {
-                                Utils.fireChannelRead(childCh, recvBufList);
-                                recvBufList.recycle();
-                            }
-                        }
-
-                        if (subException != null) {
-                            Utils.fireExceptionAndClose(childCh, subException, true);
-                        }
+                    try {
+                        dispatch(packet);
+                    } catch (Throwable t) {
+                        log.error("Failed to feed a datagram to its session", t);
+                        pipeline.fireExceptionCaught(t);
+                    } finally {
+                        packet.release();
                     }
                 }
                 readBuf.clear();
@@ -680,81 +483,6 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel implement
                 }
             }
         }
-
-        private void clearAndRelease(CodecOutputList<ByteBuf> bufList) {
-            int size = bufList.size();
-            for (int i = 0; i < size; i++) {
-                ByteBuf msg = bufList.getUnsafe(i);
-                msg.release();
-            }
-        }
-    }
-
-    private class UkcpServerOutput implements KcpOutput {
-
-        @Override
-        public void out(ByteBuf data, Kcp kcp) {
-            UkcpServerChildChannel channel = (UkcpServerChildChannel) kcp.getUser();
-            NioUnsafe unsafe = unsafe();
-            unsafe.write(UkcpPacket.newInstance(data, channel.remoteAddress()), unsafe.voidPromise());
-            unsafe.flush();
-        }
-
-    }
-
-    private static class ExceptionCloseWrapper {
-
-        final UkcpServerChildChannel channel;
-
-        final Throwable exception;
-
-        ExceptionCloseWrapper(UkcpServerChildChannel channel, Throwable exception) {
-            this.channel = channel;
-            this.exception = exception;
-        }
-
-    }
-
-    private static class CloseWaitKcp {
-
-        final Ukcp ukcp;
-
-        final int closeTime;
-
-        CloseWaitKcp(Ukcp ukcp, int closeTime) {
-            this.ukcp = ukcp;
-            this.closeTime = closeTime;
-        }
-    }
-
-    private class CloseWaitRun implements Runnable {
-
-        @Override
-        public void run() {
-            scheduleCloseWait = false;
-
-            int current = Utils.milliSeconds();
-            for (Iterator<Map.Entry<SocketAddress, CloseWaitKcp>> itr = closeWaitKcpMapItr.rewind(); itr.hasNext(); ) {
-                CloseWaitKcp w = itr.next().getValue();
-                Ukcp ukcp = w.ukcp;
-                if (Utils.itimediff(current, w.closeTime) >= 0) {
-                    ukcp.setKcpClosed();
-                    itr.remove();
-                    if (log.isDebugEnabled()) {
-                        log.debug("Terminate closeWaitKcp. ukcp={}, cause={}", ukcp, "timeout");
-                    }
-                } else if (!ukcp.checkFlush()) {
-                    ukcp.setKcpClosed();
-                    itr.remove();
-                    if (log.isDebugEnabled()) {
-                        log.debug("Terminate closeWaitKcp. ukcp={}, cause={}", ukcp, "no flush");
-                    }
-                }
-            }
-
-            tryScheduleCloseWait();
-        }
-
     }
 
 }

@@ -10,6 +10,8 @@
  *   <li>two conversations on the same wire only accept their own conv, so sessions cannot cross-talk;</li>
  *   <li>junk bytes are rejected by a negative return code instead of an exception -- the channel
  *       layer treats exceptions as fatal, which is how a port scan used to kill a live session.</li>
+ *   <li>every datagram the kernel emits carries a standard 24-byte KCP header and nothing else, so
+ *       the base swap did not quietly change the wire format (conv/cmd/frg/wnd/ts/sn/una/len).</li>
  * </ul>
  */
 package smoke;
@@ -31,12 +33,21 @@ public final class KernelSmoke {
     private static final int MAX_STEPS = 400;
     private static final long STEP_MS = 10;
 
+    /** Standard KCP header, as every implementation on the wire agrees on it. */
+    private static final int HEADER_SIZE = 24;
+    /** IKCP_CMD_PUSH from the KCP spec (0x51); ACK is 82. */
+    private static final int CMD_PUSH = 81;
+    private static final int MTU = 1400;
+    private static final int MSS = MTU - HEADER_SIZE;
+
     public static void main(String[] args) {
         roundTrip();
         twoConversationsDoNotCrossTalk();
         junkIsRejectedWithoutThrowing();
+        headerLayoutIsStandard();
         System.out.println("[kernel] PASS: the vendored kernel round-trips a multi-segment payload, "
-                + "keeps two conversations apart, and rejects junk without throwing");
+                + "keeps two conversations apart, rejects junk without throwing, and emits the "
+                + "standard 24-byte header");
     }
 
     /** One payload spanning several segments must come out of the other side unchanged. */
@@ -158,6 +169,115 @@ public final class KernelSmoke {
             }
         }
         System.out.println("[kernel] " + junk.length + " junk datagrams rejected without throwing");
+    }
+
+    /**
+     * The wire format itself: a standard 24-byte KCP header, with the payload immediately after it
+     * and nothing appended. That second half is what proves the trimming (no FEC, no CRC32, no
+     * private trailer) did not change what another implementation sees.
+     *
+     * <p>The check is shown to bite at the end: a copy with one header byte corrupted has to be
+     * rejected, otherwise a validator that accepted everything would also look green here.
+     */
+    private static void headerLayoutIsStandard() {
+        Wire wire = new Wire();
+        Kcp kcp = new Kcp(CONV_A, wire);
+        // Explicit, because the two bases disagree on defaults (window sizes, interval).
+        kcp.nodelay(true, 10, 2, true);
+        kcp.setSndWnd(1024);
+        kcp.setRcvWnd(1024);
+        kcp.setMtu(MTU);
+
+        byte[] payload = new byte[3000];
+        kcp.send(Unpooled.wrappedBuffer(payload));
+        kcp.update(System.currentTimeMillis());
+
+        int segments = (payload.length + MSS - 1) / MSS;
+        int seen = 0;
+        ByteBuf datagram;
+        while ((datagram = wire.queue.poll()) != null) {
+            try {
+                assertStandardHeader(datagram, seen, segments - 1 - seen);
+                seen++;
+            } finally {
+                datagram.release();
+            }
+        }
+        if (seen != segments) {
+            throw new AssertionError("FAIL: expected " + segments + " push datagrams for "
+                    + payload.length + " bytes, saw " + seen);
+        }
+
+        // Now make sure the validator is not vacuous: corrupt one header byte and require a fail.
+        Wire again = new Wire();
+        Kcp second = new Kcp(CONV_A, again);
+        second.nodelay(true, 10, 2, true);
+        second.setSndWnd(1024);
+        second.setRcvWnd(1024);
+        second.setMtu(MTU);
+        second.send(Unpooled.wrappedBuffer(payload));
+        second.update(System.currentTimeMillis());
+        ByteBuf corrupted = Unpooled.copiedBuffer(again.queue.peek());
+        try {
+            corrupted.setByte(corrupted.readerIndex() + 4, CMD_PUSH + 1);
+            boolean rejected = false;
+            try {
+                assertStandardHeader(corrupted, 0, segments - 1);
+            } catch (AssertionError expected) {
+                rejected = true;
+            }
+            if (!rejected) {
+                throw new AssertionError("FAIL: the header check accepted a corrupted datagram, so "
+                        + "it would not catch a wire-format change either");
+            }
+        } finally {
+            corrupted.release();
+            ByteBuf leftover;
+            while ((leftover = again.queue.poll()) != null) {
+                leftover.release();
+            }
+        }
+        System.out.println("[kernel] " + seen + " datagrams carry a standard 24-byte header"
+                + " (conv@0 cmd@4 frg@5 wnd@6 ts@8 sn@12 una@16 len@20) and no trailer");
+    }
+
+    /**
+     * Decodes one datagram the way any other KCP implementation would, and fails on anything that
+     * is not the standard header.
+     */
+    private static void assertStandardHeader(ByteBuf datagram, int expectedSn, int expectedFrg) {
+        int at = datagram.readerIndex();
+        int total = datagram.readableBytes();
+        if (total < HEADER_SIZE) {
+            throw new AssertionError("FAIL: datagram shorter than the 24-byte header: " + total);
+        }
+        long conv = datagram.getUnsignedIntLE(at);
+        int cmd = datagram.getUnsignedByte(at + 4);
+        int frg = datagram.getUnsignedByte(at + 5);
+        int wnd = datagram.getUnsignedShortLE(at + 6);
+        long ts = datagram.getUnsignedIntLE(at + 8);
+        long sn = datagram.getUnsignedIntLE(at + 12);
+        long una = datagram.getUnsignedIntLE(at + 16);
+        int payloadLen = datagram.getUnsignedShortLE(at + 20);
+
+        assertField(conv == (CONV_A & 0xFFFFFFFFL), "conv@0", conv);
+        assertField(cmd == CMD_PUSH, "cmd@4 (IKCP_CMD_PUSH)", cmd);
+        assertField(frg == expectedFrg, "frg@5 (fragment index, the last one is 0)", frg);
+        assertField(wnd > 0, "wnd@6 (free receive slots)", wnd);
+        // The vendored kernel stamps segments with milliseconds since its own construction, not
+        // with the caller's clock (KernelByteEquivalence pins the exact relation), so right after
+        // construction this has to be a small number -- an absolute epoch would not fit.
+        assertField(ts < 10_000, "ts@8 (ms since the kernel's clock origin)", ts);
+        assertField(sn == expectedSn, "sn@12 (segment number)", sn);
+        assertField(expectedSn != 0 || una == 0, "una@16 (next expected segment)", una);
+        assertField(payloadLen == total - HEADER_SIZE,
+                "len@20 (payload length; nothing may follow the payload)", payloadLen);
+    }
+
+    private static void assertField(boolean condition, String field, long actual) {
+        if (!condition) {
+            throw new AssertionError("FAIL: not a standard KCP header at " + field + ", found " + actual);
+        }
     }
 
     /** Feeds one side's datagrams into both receivers, returning how many the foreign one rejected. */

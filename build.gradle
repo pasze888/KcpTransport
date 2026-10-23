@@ -197,10 +197,20 @@ tasks.register('smokeKernel', JavaExec) {
     timeout = Duration.ofSeconds(90)
 }
 
+// 一次性等价探针：新旧两套内核在相同输入下必须输出逐字节相同的数据报，证明裁剪没有改动
+// 线上格式。与旧底座同生共死——#16 删除 kcp-netty 时连同本任务一起删。
+tasks.register('smokeKernelEquivalence', JavaExec) {
+    group = 'verification'
+    description = 'Probe: vendored kernel emits byte-identical datagrams to the kcp-netty one it replaces'
+    classpath = sourceSets.smokeTest.runtimeClasspath
+    mainClass = 'smoke.KernelByteEquivalence'
+    timeout = Duration.ofSeconds(60)
+}
+
 // 挂进 check。不挂的话 `gradlew build`（CI 就是这么跑的）永远不会执行它们，绿勾只证明编译通过。
 tasks.named('check') {
     dependsOn 'smokeKcp', 'smokeAddressPrefix', 'smokeClientConnection', 'smokeConcurrency',
-            'smokeHandshake', 'smokeFailureSemantics', 'smokeKernel'
+            'smokeHandshake', 'smokeFailureSemantics', 'smokeKernel', 'smokeKernelEquivalence'
 }
 
 dependencies {

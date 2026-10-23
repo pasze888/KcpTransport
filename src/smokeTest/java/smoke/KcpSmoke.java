@@ -1,11 +1,16 @@
 package smoke;
 
 import io.github.pasze888.kcptransport.ConnectionPipeline;
-import io.github.pasze888.kcptransport.kcp.Ukcp;
+import io.github.pasze888.kcptransport.kcp.InlineMessageExecutor;
 import io.github.pasze888.kcptransport.kcp.UkcpChannel;
 import io.github.pasze888.kcptransport.kcp.UkcpChannelOption;
 import io.github.pasze888.kcptransport.kcp.UkcpClientChannel;
 import io.github.pasze888.kcptransport.kcp.UkcpServerChannel;
+import io.github.pasze888.kcptransport.kcp.UkcpSessionConfig;
+import io.github.pasze888.kcptransport.kcp.base.IChannelManager;
+import io.github.pasze888.kcptransport.kcp.base.KcpConfig;
+import io.github.pasze888.kcptransport.kcp.base.KcpListener;
+import io.github.pasze888.kcptransport.kcp.base.Ukcp;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
@@ -23,8 +28,11 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -44,6 +52,27 @@ import java.util.concurrent.TimeUnit;
  * </ul>
  */
 public final class KcpSmoke {
+
+    /** Stands in for the server's session table in the bare-session check below. */
+    private static final IChannelManager NO_CHANNELS = new IChannelManager() {
+        @Override
+        public Ukcp get(io.netty.channel.socket.DatagramPacket msg) {
+            return null;
+        }
+
+        @Override
+        public void add(SocketAddress socketAddress, Ukcp ukcp, io.netty.channel.socket.DatagramPacket msg) {
+        }
+
+        @Override
+        public void del(Ukcp ukcp) {
+        }
+
+        @Override
+        public Collection<Ukcp> getAll() {
+            return Collections.emptyList();
+        }
+    };
 
     public static void main(String[] args) throws Exception {
         String nettyVersion = Channel.class.getPackage().getImplementationVersion();
@@ -176,21 +205,49 @@ public final class KcpSmoke {
      * a live peer's address would kill that session.
      */
     private static void malformedInputIsDropped() {
-        Ukcp ukcp = new Ukcp(1234, (data, kcp) -> { });
+        // A bare session, no channel: the drop lives in the session layer (upstream throws there and
+        // its read task turns any throw into a close), so a kernel-only check would miss the path
+        // that used to kill live sessions.
+        boolean[] closed = {false};
+        KcpListener quiet = new KcpListener() {
+            @Override
+            public void onConnected(Ukcp ukcp) {
+            }
+
+            @Override
+            public void handleReceive(ByteBuf byteBuf, Ukcp ukcp) {
+                throw new AssertionError("FAIL: a malformed datagram was delivered as a message");
+            }
+
+            @Override
+            public void handleException(Throwable ex, Ukcp ukcp) {
+                throw new AssertionError("FAIL: a malformed datagram raised " + ex, ex);
+            }
+
+            @Override
+            public void handleClose(Ukcp ukcp) {
+                closed[0] = true;
+            }
+        };
+        KcpConfig kcpConfig = new KcpConfig();
+        kcpConfig.setConv(1234);
+        Ukcp ukcp = new Ukcp((data, kcp) -> data.release(), quiet, InlineMessageExecutor.INSTANCE,
+                new UkcpSessionConfig(kcpConfig), NO_CHANNELS);
+
         byte[][] junk = {
                 {1, 2, 3},                       // shorter than the KCP header
-                new byte[24],                    // header-sized, all zeros
+                new byte[24],                    // header-sized, all zeros: conv 0 is not ours
                 new byte[60],                    // plausible size, garbage body
         };
         for (byte[] payload : junk) {
-            ByteBuf buf = Unpooled.wrappedBuffer(payload);
-            try {
-                ukcp.input(buf);                 // must not throw
-            } finally {
-                buf.release();
-            }
+            // read() takes the buffer over (its read task releases it), so nothing to release here.
+            ukcp.read(Unpooled.wrappedBuffer(payload));   // must not throw
         }
-        System.out.println("[smoke] malformed datagrams dropped without throwing");
+        if (closed[0] || !ukcp.isActive()) {
+            throw new AssertionError("FAIL: a malformed datagram ended the session");
+        }
+        ukcp.close();
+        System.out.println("[smoke] malformed datagrams dropped without throwing or closing");
     }
 
     private static void injectGarbage(int port) throws Exception {

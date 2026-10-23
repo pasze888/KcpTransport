@@ -5,30 +5,26 @@
  */
 package io.github.pasze888.kcptransport.kcp;
 
-import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.IP_TOS;
-import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.SO_RCVBUF;
-import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.SO_REUSEADDR;
-import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.SO_SNDBUF;
-import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.UKCP_AUTO_SET_CONV;
-import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.UKCP_DEAD_LINK;
 import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.UKCP_FAST_FLUSH;
-import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.UKCP_FAST_LIMIT;
 import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.UKCP_FAST_RESEND;
 import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.UKCP_INTERVAL;
-import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.UKCP_MERGE_SEGMENT_BUF;
-import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.UKCP_MIN_RTO;
 import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.UKCP_MTU;
 import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.UKCP_NOCWND;
 import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.UKCP_NODELAY;
 import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.UKCP_RCV_WND;
 import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.UKCP_SND_WND;
 import static io.github.pasze888.kcptransport.kcp.UkcpChannelOption.UKCP_STREAM;
+import static io.netty.channel.ChannelOption.IP_TOS;
+import static io.netty.channel.ChannelOption.SO_RCVBUF;
+import static io.netty.channel.ChannelOption.SO_REUSEADDR;
+import static io.netty.channel.ChannelOption.SO_SNDBUF;
 
 import java.net.DatagramSocket;
 import java.net.SocketException;
 import java.util.Map;
 import java.util.Objects;
 
+import io.github.pasze888.kcptransport.kcp.base.KcpConfig;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.ChannelException;
 import io.netty.channel.ChannelOption;
@@ -39,27 +35,41 @@ import io.netty.channel.RecvByteBufAllocator;
 import io.netty.channel.WriteBufferWaterMark;
 
 /**
+ * Per-session KCP settings for the client channel, backed by the vendored {@link KcpConfig} (see
+ * {@link DefaultUkcpServerChildChannelConfig} for why the values live there), plus the UDP socket
+ * options the channel owns.
+ *
  * @author <a href="mailto:szhnet@gmail.com">szh</a>
  */
 public class DefaultUkcpClientChannelConfig extends DefaultChannelConfig implements UkcpClientChannelConfig {
 
-    private final Ukcp ukcp;
+    private final UkcpSessionConfig session;
     private final DatagramSocket javaSocket;
 
-    public DefaultUkcpClientChannelConfig(UkcpClientChannel channel, Ukcp ukcp, DatagramSocket javaSocket) {
+    public DefaultUkcpClientChannelConfig(UkcpClientChannel channel, int conv, DatagramSocket javaSocket) {
         super(channel, new FixedRecvByteBufAllocator(Consts.FIXED_RECV_BYTEBUF_ALLOCATE_SIZE));
-        this.ukcp = Objects.requireNonNull(ukcp, "ukcp");
+        KcpConfig kcpConfig = new KcpConfig();
+        kcpConfig.setConv(conv);
+        this.session = new UkcpSessionConfig(kcpConfig);
         this.javaSocket = Objects.requireNonNull(javaSocket, "javaSocket");
+    }
+
+    /** The config the vendored session reads once, at construction. */
+    UkcpSessionConfig session() {
+        return session;
+    }
+
+    private KcpConfig kcp() {
+        return session.getKcpConfig();
     }
 
     @Override
     @SuppressWarnings("deprecation")
     public Map<ChannelOption<?>, Object> getOptions() {
-        return getOptions(
-                super.getOptions(),
-                UKCP_NODELAY, UKCP_INTERVAL, UKCP_FAST_RESEND, UKCP_FAST_LIMIT, UKCP_NOCWND, UKCP_MIN_RTO, UKCP_MTU,
-                UKCP_RCV_WND, UKCP_SND_WND, UKCP_STREAM, UKCP_DEAD_LINK, UKCP_AUTO_SET_CONV, UKCP_FAST_FLUSH,
-                UKCP_MERGE_SEGMENT_BUF, SO_RCVBUF, SO_SNDBUF, SO_REUSEADDR, IP_TOS);
+        return getOptions(super.getOptions(),
+                UKCP_NODELAY, UKCP_INTERVAL, UKCP_FAST_RESEND, UKCP_NOCWND, UKCP_MTU,
+                UKCP_RCV_WND, UKCP_SND_WND, UKCP_STREAM, UKCP_FAST_FLUSH,
+                SO_RCVBUF, SO_SNDBUF, SO_REUSEADDR, IP_TOS);
     }
 
     @Override
@@ -74,14 +84,8 @@ public class DefaultUkcpClientChannelConfig extends DefaultChannelConfig impleme
         if (option == UKCP_FAST_RESEND) {
             return (T) Integer.valueOf(getFastResend());
         }
-        if (option == UKCP_FAST_LIMIT) {
-            return (T) Integer.valueOf(getFastLimit());
-        }
         if (option == UKCP_NOCWND) {
             return (T) Boolean.valueOf(isNocwnd());
-        }
-        if (option == UKCP_MIN_RTO) {
-            return (T) Integer.valueOf(getMinRto());
         }
         if (option == UKCP_MTU) {
             return (T) Integer.valueOf(getMtu());
@@ -95,17 +99,8 @@ public class DefaultUkcpClientChannelConfig extends DefaultChannelConfig impleme
         if (option == UKCP_STREAM) {
             return (T) Boolean.valueOf(isStream());
         }
-        if (option == UKCP_DEAD_LINK) {
-            return (T) Integer.valueOf(getDeadLink());
-        }
-        if (option == UKCP_AUTO_SET_CONV) {
-            return (T) Boolean.valueOf(isAutoSetConv());
-        }
         if (option == UKCP_FAST_FLUSH) {
             return (T) Boolean.valueOf(isFastFlush());
-        }
-        if (option == UKCP_MERGE_SEGMENT_BUF) {
-            return (T) Boolean.valueOf(isMergeSegmentBuf());
         }
         if (option == SO_RCVBUF) {
             return (T) Integer.valueOf(getUdpReceiveBufferSize());
@@ -133,12 +128,8 @@ public class DefaultUkcpClientChannelConfig extends DefaultChannelConfig impleme
             setInterval((Integer) value);
         } else if (option == UKCP_FAST_RESEND) {
             setFastResend((Integer) value);
-        } else if (option == UKCP_FAST_LIMIT) {
-            setFastLimit((Integer) value);
         } else if (option == UKCP_NOCWND) {
             setNocwnd((Boolean) value);
-        } else if (option == UKCP_MIN_RTO) {
-            setMinRto((Integer) value);
         } else if (option == UKCP_MTU) {
             setMtu((Integer) value);
         } else if (option == UKCP_RCV_WND) {
@@ -147,14 +138,8 @@ public class DefaultUkcpClientChannelConfig extends DefaultChannelConfig impleme
             setSndWnd((Integer) value);
         } else if (option == UKCP_STREAM) {
             setStream((Boolean) value);
-        } else if (option == UKCP_DEAD_LINK) {
-            setDeadLink((Integer) value);
-        } else if (option == UKCP_AUTO_SET_CONV) {
-            setAutoSetConv((Boolean) value);
         } else if (option == UKCP_FAST_FLUSH) {
             setFastFlush((Boolean) value);
-        } else if (option == UKCP_MERGE_SEGMENT_BUF) {
-            setMergeSegmentBuf((Boolean) value);
         } else if (option == SO_RCVBUF) {
             setUdpReceiveBufferSize((Integer) value);
         } else if (option == SO_SNDBUF) {
@@ -172,155 +157,100 @@ public class DefaultUkcpClientChannelConfig extends DefaultChannelConfig impleme
 
     @Override
     public boolean isNodelay() {
-        return ukcp.isNodelay();
+        return kcp().isNodelay();
     }
 
     @Override
     public UkcpClientChannelConfig setNodelay(boolean nodelay) {
-        ukcp.setNodelay(nodelay);
+        kcp().nodelay(nodelay, kcp().getInterval(), kcp().getFastresend(), kcp().isNocwnd());
         return this;
     }
 
     @Override
     public int getInterval() {
-        return ukcp.getInterval();
+        return kcp().getInterval();
     }
 
     @Override
     public UkcpClientChannelConfig setInterval(int interval) {
-        ukcp.setInterval(interval);
+        kcp().nodelay(kcp().isNodelay(), interval, kcp().getFastresend(), kcp().isNocwnd());
         return this;
     }
 
     @Override
     public int getFastResend() {
-        return ukcp.getFastResend();
+        return kcp().getFastresend();
     }
 
     @Override
     public UkcpClientChannelConfig setFastResend(int fastResend) {
-        ukcp.setFastResend(fastResend);
-        return this;
-    }
-
-    @Override
-    public int getFastLimit() {
-        return ukcp.getFastLimit();
-    }
-
-    @Override
-    public UkcpChannelConfig setFastLimit(int fastLimit) {
-        ukcp.setFastLimit(fastLimit);
+        kcp().nodelay(kcp().isNodelay(), kcp().getInterval(), fastResend, kcp().isNocwnd());
         return this;
     }
 
     @Override
     public boolean isNocwnd() {
-        return ukcp.isNocwnd();
+        return kcp().isNocwnd();
     }
 
     @Override
     public UkcpClientChannelConfig setNocwnd(boolean nocwnd) {
-        ukcp.setNocwnd(nocwnd);
-        return this;
-    }
-
-    @Override
-    public int getMinRto() {
-        return ukcp.getMinRto();
-    }
-
-    @Override
-    public UkcpClientChannelConfig setMinRto(int minRto) {
-        ukcp.setMinRto(minRto);
+        kcp().nodelay(kcp().isNodelay(), kcp().getInterval(), kcp().getFastresend(), nocwnd);
         return this;
     }
 
     @Override
     public int getMtu() {
-        return ukcp.getMtu();
+        return kcp().getMtu();
     }
 
     @Override
     public UkcpClientChannelConfig setMtu(int mtu) {
-        ukcp.setMtu(mtu);
+        kcp().setMtu(mtu);
         return this;
     }
 
     @Override
     public int getRcvWnd() {
-        return ukcp.getRcvWnd();
+        return kcp().getRcvwnd();
     }
 
     @Override
     public UkcpClientChannelConfig setRcvWnd(int rcvWnd) {
-        ukcp.setRcvWnd(rcvWnd);
+        kcp().setRcvwnd(rcvWnd);
         return this;
     }
 
     @Override
     public int getSndWnd() {
-        return ukcp.getSndWnd();
+        return kcp().getSndwnd();
     }
 
     @Override
     public UkcpClientChannelConfig setSndWnd(int sndWnd) {
-        ukcp.setSndWnd(sndWnd);
+        kcp().setSndwnd(sndWnd);
         return this;
     }
 
     @Override
     public boolean isStream() {
-        return ukcp.isStream();
+        return kcp().isStream();
     }
 
     @Override
     public UkcpClientChannelConfig setStream(boolean stream) {
-        ukcp.setStream(stream);
-        return this;
-    }
-
-    @Override
-    public int getDeadLink() {
-        return ukcp.getDeadLink();
-    }
-
-    @Override
-    public UkcpClientChannelConfig setDeadLink(int deadLink) {
-        ukcp.setDeadLink(deadLink);
-        return this;
-    }
-
-    @Override
-    public boolean isAutoSetConv() {
-        return ukcp.isAutoSetConv();
-    }
-
-    @Override
-    public UkcpChannelConfig setAutoSetConv(boolean autoSetConv) {
-        ukcp.setAutoSetConv(autoSetConv);
+        kcp().setStream(stream);
         return this;
     }
 
     @Override
     public boolean isFastFlush() {
-        return ukcp.isFastFlush();
+        return session.isFastFlush();
     }
 
     @Override
     public UkcpChannelConfig setFastFlush(boolean fastFlush) {
-        ukcp.setFastFlush(fastFlush);
-        return this;
-    }
-
-    @Override
-    public boolean isMergeSegmentBuf() {
-        return ukcp.isMergeSegmentBuf();
-    }
-
-    @Override
-    public UkcpChannelConfig setMergeSegmentBuf(boolean mergeSegmentBuf) {
-        ukcp.setMergeSegmentBuf(mergeSegmentBuf);
+        session.setFastFlush(fastFlush);
         return this;
     }
 
@@ -403,7 +333,6 @@ public class DefaultUkcpClientChannelConfig extends DefaultChannelConfig impleme
     @Override
     public UkcpClientChannelConfig setAllocator(ByteBufAllocator allocator) {
         super.setAllocator(allocator);
-        ukcp.setByteBufAllocator(allocator);
         return this;
     }
 

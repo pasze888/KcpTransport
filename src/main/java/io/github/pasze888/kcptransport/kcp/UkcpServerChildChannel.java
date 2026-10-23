@@ -5,11 +5,13 @@
  */
 package io.github.pasze888.kcptransport.kcp;
 
-import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
-import java.util.List;
 
+import io.github.pasze888.kcptransport.kcp.base.IKcp;
+import io.github.pasze888.kcptransport.kcp.base.KcpListener;
+import io.github.pasze888.kcptransport.kcp.base.KcpOutput;
+import io.github.pasze888.kcptransport.kcp.base.Ukcp;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.AbstractChannel;
 import io.netty.channel.Channel;
@@ -23,9 +25,17 @@ import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
 /**
+ * One KCP session, presented as a Netty channel.
+ *
+ * <p>KcpTransport: the session underneath is java-kcp's {@code kcp.base.Ukcp} -- it owns the read
+ * and write queues, the tasks that drain them, and the close handshake. This class is the shell
+ * that turns its callbacks into channel events ({@link KcpListener}) and its datagrams into writes
+ * on the parent channel ({@link KcpOutput}).
+ *
  * @author <a href="mailto:szhnet@gmail.com">szh</a>
  */
-public final class UkcpServerChildChannel extends AbstractChannel implements UkcpChannel {
+public final class UkcpServerChildChannel extends AbstractChannel
+        implements UkcpChannel, KcpListener, KcpOutput {
 
     private static final InternalLogger log = InternalLoggerFactory.getInstance(UkcpServerChildChannel.class);
 
@@ -36,18 +46,39 @@ public final class UkcpServerChildChannel extends AbstractChannel implements Ukc
 
     private final DefaultUkcpServerChildChannelConfig config;
 
-    private final Ukcp ukcp;
-
     private final InetSocketAddress remoteAddress;
+
+    /**
+     * Built on the first datagram, not in the constructor: {@code kcp.base.Ukcp} copies its
+     * {@code KcpConfig} once at construction, and {@code ServerBootstrapAcceptor} applies this
+     * channel's child options only after the constructor returns.
+     */
+    private Ukcp ukcp;
 
     private boolean flushPending;
 
-    UkcpServerChildChannel(Channel parent, Ukcp ukcp, InetSocketAddress remoteAddress) {
+    private boolean closing;
+
+    UkcpServerChildChannel(Channel parent, InetSocketAddress remoteAddress, int conv) {
         super(parent);
-        this.config = new DefaultUkcpServerChildChannelConfig(this, ukcp);
-        ukcp.channel(this);
-        this.ukcp = ukcp;
         this.remoteAddress = remoteAddress;
+        this.config = new DefaultUkcpServerChildChannelConfig(this, conv);
+    }
+
+    /** The session, created on first use so every child option is already in effect. */
+    Ukcp ukcp() {
+        if (ukcp == null) {
+            UkcpSessionConfig sessionConfig = config.session();
+            // KcpTransport: the session queue is bounded at the point the old shell stopped
+            // draining Netty's outbound buffer (its send-window check, times MTU), so a peer that
+            // stops acking backs the write path up instead of growing a queue without limit.
+            sessionConfig.setWriteBufferSize(2 * config.getSndWnd() * config.getMtu());
+            ukcp = new Ukcp(this, this, InlineMessageExecutor.INSTANCE, sessionConfig, parent());
+            if (log.isTraceEnabled()) {
+                log.trace("Created session. remoteAddress={}, conv={}", remoteAddress, ukcp.getConv());
+            }
+        }
+        return ukcp;
     }
 
     @Override
@@ -67,12 +98,12 @@ public final class UkcpServerChildChannel extends AbstractChannel implements Ukc
 
     @Override
     public boolean isOpen() {
-        return ukcp.isActive();
+        return !closing;
     }
 
     @Override
     public boolean isActive() {
-        return isOpen();
+        return !closing;
     }
 
     @Override
@@ -117,7 +148,13 @@ public final class UkcpServerChildChannel extends AbstractChannel implements Ukc
 
     @Override
     protected void doClose() throws Exception {
-        parent().doCloseChildChannel(this); // callback parent
+        closing = true;
+        parent().removeChild(this);
+        if (ukcp != null) {
+            // Idempotent: internalClose() is a no-op once the session is inactive, which is the
+            // case when the session itself asked for this close.
+            ukcp.close();
+        }
     }
 
     @Override
@@ -127,38 +164,22 @@ public final class UkcpServerChildChannel extends AbstractChannel implements Ukc
 
     @Override
     protected void doWrite(ChannelOutboundBuffer in) throws Exception {
-        boolean sent = false;
+        Ukcp ukcp = ukcp();
         for (; ; ) {
-            Object msg = in.current();
+            ByteBuf msg = (ByteBuf) in.current();
             if (msg == null) {
                 flushPending = false;
                 break;
             }
-            try {
-                boolean done = false;
-                if (kcpSend((ByteBuf) msg)) {
-                    done = true;
-                    sent = true;
-                }
-
-                if (done) {
-                    in.remove();
-                } else {
-                    flushPending = true;
-                    break;
-                }
-            } catch (IOException e) {
-                throw e; // throw exception and close channel
+            // The session owns a queue of its own now: write() retains what it accepts, and says
+            // false only when that queue is full. A refused message stays in Netty's outbound
+            // buffer, and flushPending keeps retries off until the window opens again -- that is
+            // what keeps a slow peer from turning into unbounded memory.
+            if (!ukcp.write(msg)) {
+                flushPending = true;
+                break;
             }
-        }
-
-        if (sent) {
-            // update kcp
-            if (ukcp.isFastFlush()) {
-                parent().updateChildKcp(this);
-            } else {
-                kcpTsUpdate(Utils.milliSeconds());
-            }
+            in.remove();
         }
     }
 
@@ -186,70 +207,67 @@ public final class UkcpServerChildChannel extends AbstractChannel implements Ukc
         return flushPending;
     }
 
-    Ukcp ukcp() {
-        return ukcp;
-    }
-
+    @Override
     public int conv() {
-        return ukcp.getConv();
+        return ukcp != null ? ukcp.getConv() : config.session().getKcpConfig().getConv();
     }
 
+    @Override
     public UkcpServerChildChannel conv(int conv) {
-        ukcp.setConv(conv);
+        if (ukcp == null) {
+            config.session().getKcpConfig().setConv(conv);
+        } else {
+            ukcp.setConv(conv);
+        }
         return this;
     }
 
-    void kcpReceive(ByteBuf buf) throws IOException {
-        ukcp.receive(buf);
+    // ---- KcpListener: what the session reports back -------------------------------------------
+
+    @Override
+    public void onConnected(Ukcp ukcp) {
+        // Nothing to do here: the child channel was handed to the parent's pipeline when it was
+        // created, and that is what registers it and fires channelActive.
     }
 
-    void kcpReceive(List<ByteBuf> bufList) {
-        ukcp.receive(bufList);
+    @Override
+    public void handleReceive(ByteBuf byteBuf, Ukcp ukcp) {
+        // ReadTask releases its own reference as soon as we return, and the vanilla decoders take
+        // over whatever they are given (cumulate, then release), so the pipeline needs a reference
+        // of its own rather than a borrowed one.
+        pipeline().fireChannelRead(byteBuf.retain());
     }
 
-    void kcpInput(ByteBuf buf) throws IOException {
-        ukcp.input(buf);
+    @Override
+    public void handleException(Throwable ex, Ukcp ukcp) {
+        Utils.fireExceptionAndClose(this, ex, true);
     }
 
-    boolean kcpSend(ByteBuf buf) throws IOException {
-        if (ukcp.canSend(true)) {
-            ukcp.send(buf);
-            return true;
-        } else {
-            return false;
+    @Override
+    public void handleClose(Ukcp ukcp) {
+        closeFromSession();
+    }
+
+    /** Ends the channel because the session ended (peer gone, timeout, or an explicit close). */
+    private void closeFromSession() {
+        if (closing) {
+            return;
         }
+        closing = true;
+        parent().removeChild(this);
+        Unsafe unsafe = unsafe();
+        unsafe.close(unsafe.voidPromise());
     }
 
-    boolean kcpCanRecv() {
-        return ukcp.canRecv();
-    }
+    // ---- KcpOutput: datagrams the session wants on the wire -----------------------------------
 
-    boolean kcpCanSend() {
-        return ukcp.canSend(!flushPending);
-    }
-
-    int kcpPeekSize() {
-        return ukcp.peekSize();
-    }
-
-    int kcpUpdate(int current) {
-        return ukcp.update(current);
-    }
-
-    int kcpCheck(int current) {
-        return ukcp.check(current);
-    }
-
-    int kcpTsUpdate() {
-        return ukcp.getTsUpdate();
-    }
-
-    void kcpTsUpdate(int tsUpdate) {
-        ukcp.setTsUpdate(tsUpdate);
-    }
-
-    int kcpState() {
-        return ukcp.getState();
+    @Override
+    public void out(ByteBuf data, IKcp kcp) {
+        // kcp.base's ownership contract: the output takes the buffer, and whoever consumes it
+        // releases it. UkcpPacket does that on deallocate, exactly as before.
+        Channel.Unsafe unsafe = parent().unsafe();
+        unsafe.write(UkcpPacket.newInstance(data, remoteAddress), unsafe.voidPromise());
+        unsafe.flush();
     }
 
     final class UkcpServerChildUnsafe extends AbstractUnsafe {
@@ -267,6 +285,7 @@ public final class UkcpServerChildChannel extends AbstractChannel implements Ukc
             super.flush0();
         }
 
+        /** Retries the outbound buffer once the session has room again (the parent's timer). */
         void forceFlush() {
             super.flush0();
         }

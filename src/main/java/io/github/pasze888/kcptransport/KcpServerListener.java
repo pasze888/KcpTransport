@@ -85,6 +85,12 @@ public final class KcpServerListener {
                         .childOption(UkcpChannelOption.UKCP_FAST_RESEND, 2)
                         .childOption(UkcpChannelOption.UKCP_NOCWND, true)
                         .childOption(UkcpChannelOption.UKCP_MTU, 1400)
+                        // Both windows are spelled out because the two bases disagree on the
+                        // defaults (kcp-netty 32/128, java-kcp 32/32) and this ticket must not
+                        // change throughput behaviour. Aligning them with the client's 1024 is a
+                        // separate knob with its own ticket.
+                        .childOption(UkcpChannelOption.UKCP_SND_WND, 32)
+                        .childOption(UkcpChannelOption.UKCP_RCV_WND, 128)
                         .childHandler(new ChannelInitializer<Channel>() {
                             @Override
                             protected void initChannel(Channel channel) {
