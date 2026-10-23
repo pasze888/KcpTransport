@@ -35,6 +35,14 @@ base {
     archivesName = "${mod_id}-${minecraft_version}-${mod_loader}"
 }
 
+// 许可声明必须随产物走。MIT 与 Apache-2.0 都要求把声明和许可全文交给收到副本的人，
+// 只在仓库根目录放一份不算交付：下载 jar 的人看不到仓库。放 META-INF/ 下不污染模组命名空间。
+tasks.named('jar', Jar).configure {
+    from('LICENSE') { into 'META-INF' }
+    from('THIRD-PARTY-NOTICES.md') { into 'META-INF' }
+    from('LICENSES') { into 'META-INF/licenses' }
+}
+
 // Java 版本从 gradle.properties 读，与 CI 安装的 JDK 同源（见 .github/workflows）
 java.toolchain.languageVersion = JavaLanguageVersion.of(project.java_version as int)
 
