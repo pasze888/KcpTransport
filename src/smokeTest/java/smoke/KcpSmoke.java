@@ -204,9 +204,9 @@ public final class KcpSmoke {
     /**
      * Feeds non-KCP bytes straight into a session and requires that they are dropped.
      *
-     * <p>Regression guard for upstream issue #15. kcp-netty used to raise IOException for
-     * these, and the channel layer treats IOException as fatal, so a stray datagram aimed at
-     * a live peer's address would kill that session.
+     * <p>Regression guard for upstream issue #15. The session layer used to raise IOException for
+     * these, and a throw out of its read task closes the session, so a stray datagram aimed at
+     * a live peer's address would kill it.
      */
     private static void malformedInputIsDropped() {
         // A bare session, no channel: the drop lives in the session layer (upstream throws there and

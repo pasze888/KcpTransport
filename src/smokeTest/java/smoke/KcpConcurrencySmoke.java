@@ -31,11 +31,11 @@ import net.minecraft.network.protocol.PacketFlow;
  * <p>Two separate things are checked, because they fail in different ways:
  *
  * <ol>
- *   <li><b>The server event loop must stay single-threaded.</b> kcp-netty keeps every child's
- *       {@code Kcp} state on the server channel's event loop and holds no locks anywhere, so a
+ *   <li><b>The server event loop must stay single-threaded.</b> Every session's {@code Kcp} state
+ *       is driven on the server channel's event loop and the kernel holds no locks, so a
  *       multi-threaded group lets two threads mutate one state machine and connections die with
- *       {@code ConcurrentModificationException} during configuration. Upstream's own echo example
- *       uses a multi-threaded group, so copying it is not a defence.</li>
+ *       {@code ConcurrentModificationException} during configuration. One loop per session is
+ *       issue #17's job, not this group's.</li>
  *   <li><b>Several live connections multiplex correctly.</b> Sessions share one UDP socket, so a
  *       demux bug shows up as cross-talk or a lost reply rather than an exception.</li>
  * </ol>
@@ -63,7 +63,7 @@ public final class KcpConcurrencySmoke {
         int threads = ((MultithreadEventExecutorGroup) group.get(null)).executorCount();
         if (threads != 1) {
             throw new AssertionError("FAIL: the KCP server group must stay single-threaded, found "
-                    + threads + " threads; kcp-netty has no locks and a multi-threaded group races "
+                    + threads + " threads; the kernel has no locks and a multi-threaded group races "
                     + "the same Kcp state (issue #10)");
         }
         System.out.println("[concurrency] server KCP group threads = " + threads);

@@ -11,11 +11,10 @@ import io.netty.channel.ChannelConfig;
  * The KCP knobs a channel exposes: one getter/setter pair per field of the vendored
  * {@link io.github.pasze888.kcptransport.kcp.base.KcpConfig}.
  *
- * <p>KcpTransport: the kcp-netty-only knobs went away with that base. java-kcp has no
- * {@code deadLink} (its check is commented out upstream), no {@code minRto} setter, no
- * {@code fastLimit}, no {@code autoSetConv} (the server adopts the session number from the first
- * datagram itself) and no {@code mergeSegmentBuf} (its session layer always merges in message
- * mode).
+ * <p>KcpTransport: the vendored java-kcp kernel has no {@code deadLink} (its check is commented out
+ * upstream), no {@code minRto} setter, no {@code fastLimit}, no {@code autoSetConv} (the server
+ * adopts the session number from the first datagram itself) and no {@code mergeSegmentBuf} (its
+ * session layer always merges in message mode), so the surface stops at what it does have.
  *
  * @author <a href="mailto:szhnet@gmail.com">szh</a>
  */

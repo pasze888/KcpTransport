@@ -15,8 +15,8 @@ This mod bundles source code derived from the following projects.
 - Not vendored: `KcpServer`/`KcpClient`/`Abstract*`, the `*ChannelHandler` and
   `*ChannelManager` implementations, `Crc32Encode`/`Crc32Decode`, `FecOutPut`, `ScheduleTask`,
   `threadPool/disruptor`, `threadPool/order`, and the whole `kcp-fec` module. The `Ukcp*Channel`
-  shells around this kernel are ours, not upstream's; a per-session event loop supplies the ticking
-  that `ScheduleTask` used to provide.
+  shells around this kernel are restructured from kcp-netty (see the next section); our own
+  handler on top of them supplies the ticking that `ScheduleTask` used to provide.
 
 ### Modifications
 
@@ -40,6 +40,15 @@ Each vendored file carries the same provenance header and is otherwise changed o
    `SequencedCollection`, whose `reversed()` return type conflicts with `List`'s, so the class
    does not compile as upstream wrote it. The 11 `Deque`-only methods that carried `@Override`
    lost the annotation; behaviour is unchanged and the class stays internal to the vendored code.
+6. **Malformed datagrams are dropped, not fatal.** Upstream's `Ukcp#input` converts KCP's
+   negative return codes into `IOException`, and the session's read task treats any throw as a
+   close, so a port scan, a monitoring probe or a load-balancer health check aimed at the UDP
+   port would kill a live session. `Ukcp#input` now drops the datagram and logs at debug level,
+   matching the C original, where `ikcp_input` returns a negative code and the caller simply
+   ignores it. This is the same divergence we carried for kcp-netty (where it answered
+   [szhnet/kcp-netty#15](https://github.com/szhnet/kcp-netty/issues/15), "抛了KcpException，必须要
+   断开连接吗"), retargeted at the kernel that now sits underneath. Covered by
+   `src/smokeTest/java/smoke/KcpSmoke.java`, which feeds junk straight into a session.
 
 The vendored kernel is covered by `src/smokeTest/java/smoke/KernelSmoke.java`, which drives the
 state machine over an in-memory wire without any Netty channel.
@@ -49,46 +58,30 @@ state machine over an in-memory wire without any Netty channel.
 - Project: kcp-netty (https://github.com/szhnet/kcp-netty)
 - License: MIT
 - Copyright: Copyright (c) 2017 Zheng Sun
-- Vendored files: `src/main/java/io/github/pasze888/kcptransport/kcp/*.java` and
-  `src/main/java/io/github/pasze888/kcptransport/kcp/internal/**` — i.e. everything under `kcp/`
-  except `kcp/base/`, which is the java-kcp subset above. The two bases coexist until kcp-netty is
-  deleted.
+- Vendored files: the Netty channel shells and the packet carrier, kept from upstream under
+  `src/main/java/io/github/pasze888/kcptransport/kcp/` — `package-info`, `UkcpChannel`, `UkcpChannelConfig`,
+  `UkcpChannelOption`, `UkcpClientChannel`, `UkcpClientChannelConfig`, `UkcpClientUdpChannel`,
+  `UkcpServerChannel`, `UkcpServerChannelConfig`, `UkcpServerChildChannel`, the three
+  `Default*ChannelConfig` implementations, `UkcpPacket`, `Consts` and `Utils`. Upstream's own
+  state machine (`Kcp`), session (`Ukcp`), `KcpOutput`, `KcpMetric`, `KcpException` and the
+  `internal/` helper package were deleted with the base swap (issue #16); `kcp.base` is the
+  java-kcp kernel that replaced them.
 - Modifications: package renamed; recompiled against Netty 4.2.x; `io.netty.bootstrap.UkcpServerBootstrap`
   and `UkcpServerBootstrapConfig` dropped (they occupy Netty's own package namespace);
-  `ReItrLinkedList` changed to implement `Queue` instead of `Deque` to compile on JDK 21+
-  (SequencedCollection `reversed()` return-type conflict);
   `isCompatible` relaxed from `NioEventLoop` to `IoEventLoop` in `UkcpServerChildChannel` and
   `UkcpClientChannel`. Upstream requires the concrete 4.1-era loop class, which on Netty 4.2 only
   the deprecated `NioEventLoopGroup` compatibility path produces; the interfaces are the same one
   (`IoEventLoop extends EventLoop`), so the channels now register on
-  `MultiThreadIoEventLoopGroup` + `NioIoHandler` like any 4.2 channel (issue #11).
-
-### Behaviour changes from the upstream library
-
-These are deliberate divergences, made because the upstream behaviour is wrong for a game
-transport. Both are covered by `src/smokeTest/java/smoke/KcpSmoke.java`.
-
-1. **Dead link closes quietly instead of throwing.** Upstream raises
-   `KcpException("State=-1 after update()")` and fires it into the channel pipeline when a
-   segment has been retransmitted `dead_link` (default 20) times. The `-1` state itself comes
-   from skywind3000/kcp, where it silently marks the peer as unreachable; for UDP that is the
-   normal end of a session, not an error. Now the channel is closed without
-   `exceptionCaught` (`Utils.closeQuietly`), so a disconnect does not leave a WARNING with a
-   stack trace. Affected: `UkcpServerChannel` (2 sites), `UkcpClientChannel` (2 sites).
-
-2. **Malformed datagrams are dropped, not fatal.** Upstream's `Ukcp#input` converts KCP's
-   negative return codes into `IOException`, and the channel layer treats that as fatal. A
-   port scan, a monitoring probe or a load-balancer health check aimed at the UDP port would
-   therefore kill a live session (upstream issue #15, "抛了KcpException，必须要断开连接吗").
-   `Ukcp#input` now drops the datagram and logs at debug level, matching the C original, where
-   `ikcp_input` returns a negative code and the caller simply ignores it. A switch to do this
-   was proposed by the upstream author in issue #15 but was never implemented as of v1.5.2.
+  `MultiThreadIoEventLoopGroup` + `NioIoHandler` like any 4.2 channel (issue #11). The shells now
+  hand their datagrams to and from a `kcp.base.Ukcp` session instead of driving a `Kcp` of their
+  own, and the option surface shrank to the knobs that kernel actually has (see
+  `UkcpChannelConfig`); the vanilla pipeline above them is unchanged.
 
 ## skywind3000/kcp
 
 - Project: kcp (https://github.com/skywind3000/kcp)
 - License: MIT
-- The KCP algorithm implemented by kcp-netty is a port of this C implementation.
+- The KCP algorithm implemented by java-kcp is a port of this C implementation.
 
 ## MIT License text
 

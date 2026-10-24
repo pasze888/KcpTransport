@@ -265,8 +265,8 @@ public final class KernelSmoke {
         assertField(frg == expectedFrg, "frg@5 (fragment index, the last one is 0)", frg);
         assertField(wnd > 0, "wnd@6 (free receive slots)", wnd);
         // The vendored kernel stamps segments with milliseconds since its own construction, not
-        // with the caller's clock (KernelByteEquivalence pins the exact relation), so right after
-        // construction this has to be a small number -- an absolute epoch would not fit.
+        // with the caller's clock, so right after construction this has to be a small number --
+        // an absolute epoch would not fit.
         assertField(ts < 10_000, "ts@8 (ms since the kernel's clock origin)", ts);
         assertField(sn == expectedSn, "sn@12 (segment number)", sn);
         assertField(expectedSn != 0 || una == 0, "una@16 (next expected segment)", una);

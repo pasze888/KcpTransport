@@ -43,13 +43,12 @@ public final class KcpServerListener {
      * <p>Daemon threads matter here: the group is static and never shut down, and non-daemon
      * Netty threads would keep the JVM alive after a server stop that does not force System.exit.
      *
-     * <p><b>The thread count must stay 1.</b> kcp-netty holds no locks anywhere and expects a
-     * server channel and its children to share one event loop: inbound {@code kcpInput}, the
-     * scheduled {@code kcpUpdate}, and the pipeline dispatch into each child all run on the
-     * server channel's loop, while only a child's {@code doWrite} runs on the child's own loop.
-     * A multi-threaded group therefore lets two threads mutate one {@code Kcp} and connections
-     * die with {@code ConcurrentModificationException} during configuration. Upstream's own
-     * echo example uses a multi-threaded group, so copying it is not a defence. See issue #10.
+     * <p><b>The thread count must stay 1.</b> Every session shares this channel's loop: datagrams
+     * are fed to it from {@code UkcpServerChannel#doReadMessages}, its timer flushes all of them,
+     * and nothing confines a session to a thread of its own. Splitting them one loop per session is
+     * ADR-0008 / issue #17; until then a multi-threaded group would let two threads mutate one
+     * {@code Kcp}, and connections would die with {@code ConcurrentModificationException} during
+     * configuration (issue #10).
      */
     private static final EventLoopGroup KCP_GROUP = new MultiThreadIoEventLoopGroup(
             1, new DefaultThreadFactory("kcptransport-IO", true), NioIoHandler.newFactory());
@@ -85,10 +84,10 @@ public final class KcpServerListener {
                         .childOption(UkcpChannelOption.UKCP_FAST_RESEND, 2)
                         .childOption(UkcpChannelOption.UKCP_NOCWND, true)
                         .childOption(UkcpChannelOption.UKCP_MTU, 1400)
-                        // Both windows are spelled out because the two bases disagree on the
-                        // defaults (kcp-netty 32/128, java-kcp 32/32) and this ticket must not
-                        // change throughput behaviour. Aligning them with the client's 1024 is a
-                        // separate knob with its own ticket.
+                        // The windows are spelled out rather than left to the vendored defaults
+                        // (java-kcp ships 32/32) so the base swap did not change throughput
+                        // behaviour. Aligning them with the client's 1024 is a separate knob with
+                        // its own ticket.
                         .childOption(UkcpChannelOption.UKCP_SND_WND, 32)
                         .childOption(UkcpChannelOption.UKCP_RCV_WND, 128)
                         .childHandler(new ChannelInitializer<Channel>() {

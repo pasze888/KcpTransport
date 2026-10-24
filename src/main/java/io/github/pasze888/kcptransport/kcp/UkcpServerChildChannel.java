@@ -69,9 +69,8 @@ public final class UkcpServerChildChannel extends AbstractChannel
     Ukcp ukcp() {
         if (ukcp == null) {
             UkcpSessionConfig sessionConfig = config.session();
-            // KcpTransport: the session queue is bounded at the point the old shell stopped
-            // draining Netty's outbound buffer (its send-window check, times MTU), so a peer that
-            // stops acking backs the write path up instead of growing a queue without limit.
+            // KcpTransport: the session queue is bounded at two send windows, so a peer that stops
+            // acking backs Netty's outbound buffer up instead of growing a queue without limit.
             sessionConfig.setWriteBufferSize(2 * config.getSndWnd() * config.getMtu());
             ukcp = new Ukcp(this, this, InlineMessageExecutor.INSTANCE, sessionConfig, parent());
             if (log.isTraceEnabled()) {
@@ -264,7 +263,7 @@ public final class UkcpServerChildChannel extends AbstractChannel
     @Override
     public void out(ByteBuf data, IKcp kcp) {
         // kcp.base's ownership contract: the output takes the buffer, and whoever consumes it
-        // releases it. UkcpPacket does that on deallocate, exactly as before.
+        // releases it. UkcpPacket does that on deallocate.
         //
         // KcpTransport: written through the parent's public outbound API, not through its Unsafe.
         // A child and its parent can sit on different event loops (the smokes split boss from

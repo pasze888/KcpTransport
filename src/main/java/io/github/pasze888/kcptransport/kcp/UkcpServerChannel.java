@@ -46,8 +46,8 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
  * <p>KcpTransport: the sessions are java-kcp's {@code kcp.base.Ukcp}, one per remote address. They
  * do not run on a loop of their own yet (ADR-0008, issue #17): this channel's event loop ticks them
  * through {@link #run()}, which is upstream's timer semantics (flush, then reschedule for the delay
- * the flush asks for). Resolution is remote address, as before; the session number is still chosen
- * by the client and adopted from its first datagram.
+ * the flush asks for). Resolution is the remote address; the session number is still chosen by the
+ * client and adopted from its first datagram.
  *
  * @author <a href="mailto:szhnet@gmail.com">szh</a>
  */
@@ -161,7 +161,7 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel
         }
         // close child channel
         // KcpTransport: every iteration removes the child from this table as it closes, which the
-        // concurrent map tolerates; the old shell had to snapshot into a list.
+        // concurrent map tolerates without a snapshot.
         for (UkcpServerChildChannel childCh : childChannelMap.values()) {
             Unsafe childUnsafe = childCh.unsafe();
             try {

@@ -92,8 +92,9 @@ public final class UkcpClientChannel extends AbstractChannel
     Ukcp ukcp() {
         if (ukcp == null) {
             UkcpSessionConfig sessionConfig = config.session();
-            // Same bound as the server side: refuse writes once the session queue is as deep as
-            // the old shell's send-window check allowed, and let Netty's outbound buffer back up.
+            // KcpTransport: same bound as the server child channel -- refuse writes once the
+            // session queue is two send windows deep, so a peer that stops acking backs Netty's
+            // outbound buffer up instead of growing a queue without limit.
             sessionConfig.setWriteBufferSize(2 * config.getSndWnd() * config.getMtu());
             ukcp = new Ukcp(this, this, InlineMessageExecutor.INSTANCE, sessionConfig, this);
         }
