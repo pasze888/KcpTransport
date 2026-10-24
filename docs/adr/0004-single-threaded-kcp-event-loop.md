@@ -1,5 +1,9 @@
 # KCP 的 NioEventLoopGroup 固定单线程
 
+状态：Accepted，**将被 [ADR-0008](0008-per-session-event-loop.md) superseded**；那张决策要等 [#17](https://github.com/pasze888/KcpTransport/issues/17) 把每会话 loop 接上、[#18](https://github.com/pasze888/KcpTransport/issues/18) 实机验证通过才转正，在那之前本文仍按现状执行。
+
+> 换底座后（[ADR-0007](0007-switch-base-to-java-kcp.md) 已 Accepted），下面正文给的**理由**——kcp-netty 零锁、父 channel 与 child 必须共用一条 loop——不再描述代码。线程数仍然是 1，但原因变了：外壳仍由父 channel 的 `run()` 统一驱动全部会话，每会话还没有自己的 loop（#17）。在 #17 落地前**不要去调大线程数**，断言仍在（`KcpServerListener.KCP_GROUP` 与 `KcpConcurrencySmoke`）。
+
 KCP 的 `EventLoopGroup` 在服务端（`KcpServerListener`）与客户端（`KcpClientBootstrap`）各只有一处，线程数**必须**是 1。这不是调优参数，是 kcp-netty 的并发前提。
 
 kcp-netty 全层零锁：`UkcpServerChannel` 与 `Kcp` 里 `synchronized`、`ReentrantLock`、`Atomic*` 出现次数都是 0。它靠「server channel 与它的 child 共用同一个 event loop」串行化——入站 `kcpInput`/`kcpReceive`、`eventLoop().schedule` 驱动的 `kcpUpdate`、`fireChannelRead` 进子管道全在父 channel 的 loop 上。但 `UkcpServerChildChannel` 的父子只是逻辑关系，真正注册到哪个 loop 由 `ServerBootstrap` 的 childGroup 决定；多线程组下 child 的 `doWrite` 会跑在另一个 loop 上，与父 loop 的定时 `kcpUpdate` 并发改同一个 `Kcp`，`Kcp.flush` 遍历发送队列时被另一线程改动，抛 `ConcurrentModificationException`。实测表现是带 `kcp;` 前缀进服能过登录，在 configuration 阶段（大突发）断连：客户端 30s 报连接超时，服务端记 `lost connection: Disconnected`。

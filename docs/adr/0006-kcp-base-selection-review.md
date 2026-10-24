@@ -1,5 +1,9 @@
 # KCP 底座维持内嵌 kcp-netty，横向选型复核后不动
 
+状态：**superseded by [ADR-0007](0007-switch-base-to-java-kcp.md)**（2026-10-25）。维持 kcp-netty 的结论不成立：判据「底座要在 Netty 里给出 Channel 级字节流」在保留自家外壳后不再必要。九家实现的横向事实、线上格式是标准 KCP、私有扩展不上线，这些仍然成立。
+
+> 下面几处**只对旧底座成立**，不要照着它读现在的代码：①「全仓 grep 不到 crc/fec/ackmask」——新内核带 ackMask 代码（`base/KcpConfig.java:72` 等），只是默认 0 不上线；②「开流模式去掉单帧硬上限」——新内核的段数判定是无条件的（`base/Kcp.java:486`），流模式同样受 255 片限制，**这一项较旧底座是倒退**；③「服务端没设收发窗」——现在显式设了 32/128（`KcpServerListener.java:91-92`），不同于新内核默认的 32/32。欠着的两件零件本身仍然欠着。
+
 2026-10-23 对 skywind3000/kcp、xtaci/kcp-go、l42111996/java-kcp、szhnet/kcp-netty、KumoKyaku/kcp（C#）、deepseeksss/kcp（Rust）、PhotonLibOS、MirrorNetworking/kcp2k 做了一次横向选型复核，结论是**底座不动**。本文回答的是 ADR-0001 之后的追问：「内嵌的这份是不是最好的底座，要不要换成别的」，以及「横向看下来，别人有的零件我们缺不缺」。
 
 完整的逐项对照表与源码出处见 [docs/research/kcp-comparison.md](../research/kcp-comparison.md)，本篇只记录决策与理由。

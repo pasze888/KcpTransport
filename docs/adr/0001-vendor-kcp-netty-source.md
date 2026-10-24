@@ -1,5 +1,7 @@
 # 内嵌 kcp-netty 源码，而不是引 jar 依赖
 
+状态：**superseded by [ADR-0007](0007-switch-base-to-java-kcp.md)**（2026-10-25）。底座已换成内嵌 java-kcp 的内核与会话层，kcp-netty 只剩通道外壳。本文保留作历史：其中「不引 jar、改为内嵌」的结论仍然成立，被取代的是「内嵌哪一份」。
+
 MC 26.3 自带 Netty 4.2.16，而 kcp-netty 1.5.2 的现成 jar 在该 Netty 上运行期 NoSuchMethodError（`NioEventLoop UkcpServerChannel.eventLoop()`，协变返回描述符断裂）——只有针对 4.2 重新编译才修，上游不归我们控制。因此 30 个源文件搬进 `io.github.pasze888.kcptransport.kcp` 改包名内嵌，也不引依赖。
 
 ## Considered Options

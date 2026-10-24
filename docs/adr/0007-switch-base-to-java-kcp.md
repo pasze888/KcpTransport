@@ -1,6 +1,8 @@
 # 底座换成内嵌 java-kcp，只取内核与会话层
 
-状态：Proposed（2026-10-23）。对应规格 [#12](https://github.com/pasze888/KcpTransport/issues/12)。切片 ①（单 loop 打通既有冒烟）落地后改 Accepted，届时在 ADR-0001 与 ADR-0006 顶部标注取代关系。
+状态：Accepted（2026-10-23 提出，2026-10-25 转正）。对应规格 [#12](https://github.com/pasze888/KcpTransport/issues/12)。切片 ①（单 loop 打通既有冒烟）已落地：内核搬入 #13、两端外壳接线 #14/#15、旧底座删除 #16，七个冒烟全绿。取代 [ADR-0001](0001-vendor-kcp-netty-source.md) 与 [ADR-0006](0006-kcp-base-selection-review.md)。
+
+本文只决定「底座是哪一份」。把会话拆到各自的 event loop 是 [ADR-0008](0008-per-session-event-loop.md) 的事，那张决策尚未转正，当前仍按 ADR-0004 的单 loop 运行。
 
 ADR-0006 横向复核九家实现后维持内嵌 kcp-netty，判据是「底座得在 Netty 里给出 Channel 级字节流」。这条判据现在不再成立：我们保留自己的 `Ukcp*Channel` 外壳（ADR-0002 不破），底座只需要提供**内核 + 会话层**——`Kcp` 状态机、按会话隔离的收/发队列、每会话一个 executor。kcp-netty 上游自 2023-09 停止维护，而 l42111996/java-kcp（Apache-2.0，HEAD 2026-08-12）恰好就是这个形状，它的每会话 executor 正是 ADR-0004 单线程天花板想要又造不出来的东西。
 
@@ -14,9 +16,9 @@ ADR-0006 横向复核九家实现后维持内嵌 kcp-netty，判据是「底座�
 
 ## Consequences
 
-- 搬进本仓的是 `kcp-base` 的 `kcp/`、`internal/`、`threadPool/netty`，包名改成 `io.github.pasze888.kcptransport.kcp`。ADR-0001 的搬运纪律继续适用：分叉点用 `// KcpTransport:` marker，散文进 THIRD-PARTY-NOTICES.md，处数不在文档里写死。
+- 搬进本仓的是 `kcp-base` 的 `kcp/`、`internal/`、`threadPool/netty`，包名改成 `io.github.pasze888.kcptransport.kcp.base`（外壳仍占 `...kcp`）。ADR-0001 的搬运纪律继续适用：分叉点用 `// KcpTransport:` marker，散文进 THIRD-PARTY-NOTICES.md，处数不在文档里写死。
 - 不搬 `kcp-fec`：CRC32/FEC/ackMask 一律不开，线上仍是标准 24 字节头。ADR-0006 的这条结论与「拿 kcp-go 当第三方参照对端」的做法都不变。
-- 会带进一个非 optional 的 `jctools-core`（`Ukcp` 用 `MpscLinkedQueue`）。是内联那一个队列实现还是收作依赖，切片 ① 里定，两种都只影响几行 build.gradle。
+- `jctools-core` 没有带进来（`Ukcp` 用 `MpscLinkedQueue`，改成了 Netty 自己的 `PlatformDependent.newMpscQueue()`，同一份合同，无需新依赖）。
 - **#11 的 Netty 4.2 移植不作废**：那次改动全在 channel 层（`AbstractChannel`/`IoEventLoop`），两家的 `Kcp.java` 只碰 `ByteBuf`/`Allocator`/`Recycler`。
-- **单帧上限没有改善**：java-kcp 消息模式仍是 255 片上限（`Kcp.java:483`），流模式作者自标「可能有bug还未测试」（`KcpConfig.java:52-59`）。ADR-0006 欠的两件零件继续欠着。
-- 旧的 6000 余行 `kcp/` 连同内部分叉 marker 一并删除，靠 git 历史找回；不保留双实现开关。
+- **单帧上限反而收紧了**：java-kcp 的 255 片判定是无条件的（`base/Kcp.java:486`，原文注释 "Maybe don't need the conditon in stream mode"），而旧底座只在消息模式下生效——流模式这一条较旧底座是**倒退**。流模式本身作者也自标「可能有bug还未测试」（`KcpConfig.java:52-59`）。ADR-0006 欠的两件零件继续欠着。
+- 旧底座的 14 个文件（约 4400 行）连同内部分叉 marker 已随 #16 删除，靠 git 历史找回；不保留双实现开关。仓库里只剩 `kcp.base` 一套状态机。
