@@ -31,7 +31,7 @@ import io.netty.channel.WriteBufferWaterMark;
  *
  * <p>KcpTransport: the values live in a {@link KcpConfig} rather than being pushed into a live
  * {@code Ukcp} as options arrive, because {@code kcp.base.Ukcp} copies the config once, when it is
- * constructed. The child builds its session lazily on the first datagram -- after
+ * constructed. The child builds its session on its event loop at registration -- after
  * {@code ServerBootstrapAcceptor} has applied these child options -- so every option set here is
  * in effect from the session's first packet.
  *

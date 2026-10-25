@@ -7,11 +7,16 @@ package io.github.pasze888.kcptransport.kcp;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 
 import io.github.pasze888.kcptransport.kcp.base.IKcp;
 import io.github.pasze888.kcptransport.kcp.base.KcpListener;
 import io.github.pasze888.kcptransport.kcp.base.KcpOutput;
 import io.github.pasze888.kcptransport.kcp.base.Ukcp;
+import io.github.pasze888.kcptransport.kcp.base.threadpool.netty.NettyMessageExecutor;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.AbstractChannel;
 import io.netty.channel.Channel;
@@ -20,9 +25,8 @@ import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoop;
 import io.netty.channel.IoEventLoop;
+import io.netty.util.concurrent.ScheduledFuture;
 import io.netty.util.internal.StringUtil;
-import io.netty.util.internal.logging.InternalLogger;
-import io.netty.util.internal.logging.InternalLoggerFactory;
 
 /**
  * One KCP session, presented as a Netty channel.
@@ -37,8 +41,6 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
 public final class UkcpServerChildChannel extends AbstractChannel
         implements UkcpChannel, KcpListener, KcpOutput {
 
-    private static final InternalLogger log = InternalLoggerFactory.getInstance(UkcpServerChildChannel.class);
-
     private static final ChannelMetadata METADATA = new ChannelMetadata(false);
 
     private static final String EXPECTED_TYPES =
@@ -49,15 +51,19 @@ public final class UkcpServerChildChannel extends AbstractChannel
     private final InetSocketAddress remoteAddress;
 
     /**
-     * Built on the first datagram, not in the constructor: {@code kcp.base.Ukcp} copies its
+     * Built on registration, not in the constructor: {@code kcp.base.Ukcp} copies its
      * {@code KcpConfig} once at construction, and {@code ServerBootstrapAcceptor} applies this
      * channel's child options only after the constructor returns.
      */
-    private Ukcp ukcp;
+    private volatile Ukcp ukcp;
 
     private boolean flushPending;
 
-    private boolean closing;
+    private volatile boolean closing;
+
+    private final Queue<ByteBuf> pendingReads = new ConcurrentLinkedQueue<>();
+
+    private ScheduledFuture<?> updateTask;
 
     UkcpServerChildChannel(Channel parent, InetSocketAddress remoteAddress, int conv) {
         super(parent);
@@ -65,18 +71,20 @@ public final class UkcpServerChildChannel extends AbstractChannel
         this.config = new DefaultUkcpServerChildChannelConfig(this, conv);
     }
 
-    /** The session, created on first use so every child option is already in effect. */
+    @Override
+    protected void doRegister() {
+        UkcpSessionConfig sessionConfig = config.session();
+        sessionConfig.setWriteBufferSize(2 * config.getSndWnd() * config.getMtu());
+        ukcp = new Ukcp(this, this, new NettyMessageExecutor(eventLoop()), sessionConfig, parent());
+        // Run after register0 has published isRegistered(), so no first datagram can get stranded
+        // between this registration and the parent's isRegistered() check in kcpRead.
+        eventLoop().execute(this::drainPendingReads);
+        updateTask = eventLoop().scheduleAtFixedRate(this::update, 0,
+                Math.max(1, config.getInterval()), TimeUnit.MILLISECONDS);
+    }
+
+    /** Published for the parent's IChannelManager view; never constructs or drives the kernel. */
     Ukcp ukcp() {
-        if (ukcp == null) {
-            UkcpSessionConfig sessionConfig = config.session();
-            // KcpTransport: the session queue is bounded at two send windows, so a peer that stops
-            // acking backs Netty's outbound buffer up instead of growing a queue without limit.
-            sessionConfig.setWriteBufferSize(2 * config.getSndWnd() * config.getMtu());
-            ukcp = new Ukcp(this, this, InlineMessageExecutor.INSTANCE, sessionConfig, parent());
-            if (log.isTraceEnabled()) {
-                log.trace("Created session. remoteAddress={}, conv={}", remoteAddress, ukcp.getConv());
-            }
-        }
         return ukcp;
     }
 
@@ -147,8 +155,13 @@ public final class UkcpServerChildChannel extends AbstractChannel
 
     @Override
     protected void doClose() throws Exception {
+        assert ukcp == null || eventLoop().inEventLoop() : "Session closed outside its event loop";
         closing = true;
         parent().removeChild(this);
+        if (updateTask != null) {
+            updateTask.cancel(false);
+        }
+        discardPendingReads();
         if (ukcp != null) {
             // Idempotent: internalClose() is a no-op once the session is inactive, which is the
             // case when the session itself asked for this close.
@@ -161,8 +174,59 @@ public final class UkcpServerChildChannel extends AbstractChannel
         // read operation be control by parent
     }
 
+    /** Takes ownership even before registration completes. Only the child loop feeds the kernel. */
+    void kcpRead(ByteBuf byteBuf) {
+        pendingReads.offer(byteBuf);
+        if (closing) {
+            // A parent read may race with child close after the map lookup.
+            discardPendingReads();
+        } else if (isRegistered()) {
+            try {
+                eventLoop().execute(this::drainPendingReads);
+            } catch (RejectedExecutionException ex) {
+                discardPendingReads();
+            }
+        }
+    }
+
+    private void drainPendingReads() {
+        assert eventLoop().inEventLoop() : "Session read outside its event loop";
+        for (ByteBuf byteBuf; (byteBuf = pendingReads.poll()) != null; ) {
+            if (closing) {
+                byteBuf.release();
+            } else {
+                ukcp.read(byteBuf);
+            }
+        }
+    }
+
+    private void discardPendingReads() {
+        for (ByteBuf byteBuf; (byteBuf = pendingReads.poll()) != null; ) {
+            byteBuf.release();
+        }
+    }
+
+    private void update() {
+        assert eventLoop().inEventLoop() : "Session tick outside its event loop";
+        if (closing) {
+            return;
+        }
+        try {
+            long current = System.currentTimeMillis();
+            if (current >= ukcp.getTsUpdate()) {
+                ukcp.setTsUpdate(current + ukcp.flush(current));
+            }
+            if (flushPending && ukcp.canSend(false)) {
+                unsafe().forceFlush();
+            }
+        } catch (Throwable ex) {
+            handleException(ex, ukcp);
+        }
+    }
+
     @Override
     protected void doWrite(ChannelOutboundBuffer in) throws Exception {
+        assert eventLoop().inEventLoop() : "Session write outside its event loop";
         Ukcp ukcp = ukcp();
         for (; ; ) {
             ByteBuf msg = (ByteBuf) in.current();
@@ -231,6 +295,7 @@ public final class UkcpServerChildChannel extends AbstractChannel
 
     @Override
     public void handleReceive(ByteBuf byteBuf, Ukcp ukcp) {
+        assert eventLoop().inEventLoop() : "Session kernel callback outside its event loop";
         // ReadTask releases its own reference as soon as we return, and the vanilla decoders take
         // over whatever they are given (cumulate, then release), so the pipeline needs a reference
         // of its own rather than a borrowed one.
@@ -262,6 +327,7 @@ public final class UkcpServerChildChannel extends AbstractChannel
 
     @Override
     public void out(ByteBuf data, IKcp kcp) {
+        assert eventLoop().inEventLoop() : "Session flush outside its event loop";
         // kcp.base's ownership contract: the output takes the buffer, and whoever consumes it
         // releases it. UkcpPacket does that on deallocate.
         //
@@ -291,7 +357,7 @@ public final class UkcpServerChildChannel extends AbstractChannel
             super.flush0();
         }
 
-        /** Retries the outbound buffer once the session has room again (the parent's timer). */
+        /** Retries the outbound buffer once the session has room again (the session's timer). */
         void forceFlush() {
             super.flush0();
         }

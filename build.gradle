@@ -158,10 +158,11 @@ tasks.register('smokeClientConnection', JavaExec) {
     timeout = Duration.ofSeconds(60)
 }
 
-// 并发契约：服务端组仍单线程（会话亲和是 #17，见 ADR-0008），且多连接复用不串扰。
+// 并发契约：不同会话使用不同 loop，每条会话亲和且多连接复用不串扰。
 tasks.register('smokeConcurrency', JavaExec) {
     group = 'verification'
-    description = 'Smoke test: single-threaded KCP event loop invariant and 3 concurrent sessions'
+    description = 'Smoke test: per-session event loop affinity and 3 concurrent sessions'
+    enableAssertions = true
     classpath = sourceSets.smokeTest.runtimeClasspath
     mainClass = 'smoke.KcpConcurrencySmoke'
     timeout = Duration.ofSeconds(90)

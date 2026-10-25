@@ -83,12 +83,9 @@ public final class KcpSmoke {
 
         malformedInputIsDropped();
 
-        // KcpTransport: one loop for the whole KCP endpoint, exactly like KcpServerListener
-        // (.group(KCP_GROUP) with a single thread). A session's kernel keeps reusable iterators and
-        // no locks, so the parent channel and every child must share one thread; splitting boss from
-        // worker here would let two threads drive one session (Kcp.release()/flush() then trip over
-        // each other). Issue #17 is where sessions get loops of their own, with the affinity that
-        // needs.
+        // KcpTransport: this smoke deliberately uses one loop as a compatibility fixture. The
+        // production server uses a separate parent loop and a fixed session-loop pool; see #17 and
+        // KcpConcurrencySmoke for the per-session affinity and shared-loop negative control.
         EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         Channel server = null;
         Channel a = null;

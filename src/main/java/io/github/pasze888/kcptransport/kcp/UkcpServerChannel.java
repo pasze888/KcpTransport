@@ -17,7 +17,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 
 import io.github.pasze888.kcptransport.kcp.base.IChannelManager;
 import io.github.pasze888.kcptransport.kcp.base.Kcp;
@@ -43,16 +42,15 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
  * The UDP listening channel. It owns the socket and the session table, and routes every datagram
  * to the session that matches its remote address.
  *
- * <p>KcpTransport: the sessions are java-kcp's {@code kcp.base.Ukcp}, one per remote address. They
- * do not run on a loop of their own yet (ADR-0008, issue #17): this channel's event loop ticks them
- * through {@link #run()}, which is upstream's timer semantics (flush, then reschedule for the delay
- * the flush asks for). Resolution is the remote address; the session number is still chosen by the
- * client and adopted from its first datagram.
+ * <p>KcpTransport: the sessions are java-kcp's {@code kcp.base.Ukcp}, one per remote address, and
+ * each session runs on its child channel's event loop (ADR-0008, issue #17). This channel only
+ * routes datagrams by remote address. The session number is still chosen by the client and adopted
+ * from its first datagram.
  *
  * @author <a href="mailto:szhnet@gmail.com">szh</a>
  */
 public final class UkcpServerChannel extends AbstractNioMessageChannel
-        implements ServerChannel, Runnable, IChannelManager {
+        implements ServerChannel, IChannelManager {
 
     private static final InternalLogger log = InternalLoggerFactory.getInstance(UkcpServerChannel.class);
 
@@ -72,8 +70,6 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel
     // themselves from this table from their own thread. On one loop it behaves like a plain map.
     private final ConcurrentHashMap<SocketAddress, UkcpServerChildChannel> childChannelMap =
             new ConcurrentHashMap<>();
-
-    private boolean scheduleUpdate;
 
     private static DatagramChannel newSocket(SelectorProvider provider) {
         try {
@@ -163,9 +159,8 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel
         // KcpTransport: every iteration removes the child from this table as it closes, which the
         // concurrent map tolerates without a snapshot.
         for (UkcpServerChildChannel childCh : childChannelMap.values()) {
-            Unsafe childUnsafe = childCh.unsafe();
             try {
-                childUnsafe.close(childUnsafe.voidPromise());
+                childCh.close();
             } catch (Exception e) {
                 log.error("Failed to close a child channel. childChannel={}", childCh);
             }
@@ -308,52 +303,11 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel
             log.debug("Create childChannel. remoteAddress={}, conv={}", remoteAddress, conv);
         }
 
-        if (!scheduleUpdate) {
-            scheduleUpdate = true;
-            eventLoop().execute(this);
-        }
-
         return ch;
     }
 
     void removeChild(UkcpServerChildChannel childChannel) {
         childChannelMap.remove(childChannel.remoteAddress(), childChannel);
-    }
-
-    /**
-     * Drives every session once: flush when its own timestamp is due, and retry a write that the
-     * session had no room for. Reschedules itself for the smallest delay any session asked for --
-     * the same shape as upstream's per-session {@code ScheduleTask}, collapsed into one timer
-     * because issue #17 (one loop per session) has not happened yet.
-     */
-    @Override
-    public void run() {
-        scheduleUpdate = false;
-        long current = System.currentTimeMillis();
-        long nextDelay = Long.MAX_VALUE;
-
-        for (UkcpServerChildChannel childCh : childChannelMap.values()) {
-            if (!childCh.isActive()) {
-                continue;
-            }
-            Ukcp ukcp = childCh.ukcp();
-            long tsUpdate = ukcp.getTsUpdate();
-            if (current >= tsUpdate) {
-                long next = ukcp.flush(current);
-                ukcp.setTsUpdate(current + next);
-                nextDelay = Math.min(nextDelay, next);
-            } else {
-                nextDelay = Math.min(nextDelay, tsUpdate - current);
-            }
-            if (childCh.isFlushPending() && ukcp.canSend(false)) {
-                childCh.unsafe().forceFlush();
-            }
-        }
-
-        if (nextDelay != Long.MAX_VALUE) {
-            scheduleUpdate = true;
-            eventLoop().schedule(this, Math.max(1L, nextDelay), TimeUnit.MILLISECONDS);
-        }
     }
 
     /** Routes one datagram to its session, creating the session when this is its first one. */
@@ -381,7 +335,7 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel
 
         // The session takes the buffer over (ReadTask releases it after feeding the kernel), so
         // hand it a reference of its own and let UkcpPacket release its own in the caller.
-        childCh.ukcp().read(content.retain());
+        childCh.kcpRead(content.retain());
     }
 
     // ---- IChannelManager: the session layer's view of this table ------------------------------
@@ -408,7 +362,10 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel
     public Collection<Ukcp> getAll() {
         List<Ukcp> all = new ArrayList<>(childChannelMap.size());
         for (UkcpServerChildChannel childCh : childChannelMap.values()) {
-            all.add(childCh.ukcp());
+            Ukcp ukcp = childCh.ukcp();
+            if (ukcp != null) {
+                all.add(ukcp);
+            }
         }
         return all;
     }

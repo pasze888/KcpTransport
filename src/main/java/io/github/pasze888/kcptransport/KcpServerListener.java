@@ -34,24 +34,22 @@ import org.jspecify.annotations.Nullable;
 public final class KcpServerListener {
 
     /**
-     * A private group rather than the one MC hands out: KCP's lifetime must not be tied to a
-     * server or a world, and the single-threaded contract below is easier to hold when nothing
-     * else can register into it. Since the channels now accept any {@code IoEventLoop} (Netty
-     * 4.2's IoHandle model, issue #11), borrowing MC's group is possible, just not desirable
-     * while KCP is pinned to one thread.
+     * Private groups rather than the one MC hands out: KCP's lifetime must not be tied to a
+     * server or a world.
      *
      * <p>Daemon threads matter here: the group is static and never shut down, and non-daemon
      * Netty threads would keep the JVM alive after a server stop that does not force System.exit.
      *
-     * <p><b>The thread count must stay 1.</b> Every session shares this channel's loop: datagrams
-     * are fed to it from {@code UkcpServerChannel#doReadMessages}, its timer flushes all of them,
-     * and nothing confines a session to a thread of its own. Splitting them one loop per session is
-     * ADR-0008 / issue #17; until then a multi-threaded group would let two threads mutate one
-     * {@code Kcp}, and connections would die with {@code ConcurrentModificationException} during
-     * configuration (issue #10).
+     * <p>The parent has one loop for UDP reads and the child group supplies session loops. A session
+     * is never driven by the parent's loop; its kernel, pipeline, and scheduled flushes stay on the
+     * loop selected when the child is registered (ADR-0008 / issue #17).
      */
+    private static final EventLoopGroup KCP_BOSS_GROUP = new MultiThreadIoEventLoopGroup(
+            1, new DefaultThreadFactory("kcptransport-boss", true), NioIoHandler.newFactory());
+
+    // ponytail: two session loops initially; size this fixed pool from load measurements later.
     private static final EventLoopGroup KCP_GROUP = new MultiThreadIoEventLoopGroup(
-            1, new DefaultThreadFactory("kcptransport-IO", true), NioIoHandler.newFactory());
+            2, new DefaultThreadFactory("kcptransport-session", true), NioIoHandler.newFactory());
 
     private KcpServerListener() {
     }
@@ -77,7 +75,7 @@ public final class KcpServerListener {
                 // (shutdown) and stopTcpServerListener (LAN off, filters non-local channels)
                 // already close the KCP listener -- only the event loop above outlives them.
                 ChannelFuture future = new ServerBootstrap()
-                        .group(KCP_GROUP)
+                        .group(KCP_BOSS_GROUP, KCP_GROUP)
                         .channel(UkcpServerChannel.class)
                         .childOption(UkcpChannelOption.UKCP_NODELAY, true)
                         .childOption(UkcpChannelOption.UKCP_INTERVAL, 10)

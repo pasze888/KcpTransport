@@ -24,8 +24,8 @@
 |---|---|---|---|---|---|
 | 线上字节格式 | 标准 24 字节头（conv/cmd/frg/wnd/ts/sn/una/len），**无 CRC** | 同 skywind | **三处私有扩展**：整包 CRC32(4B)、FEC 头(8B)、ackMask 位图(24B+N) | **就是标准 KCP**（grep 无 crc/fec/ackmask） | kcp/Kcp.java:87（`IKCP_OVERHEAD = 24`） |
 | 与标准 KCP 互通 | 基准 | 互通（README 承诺） | 开扩展后**不互通**；且 CRC/FEC 头会与 MC 的 Varint21 分帧抢字节 | **互通** | kcp/Kcp.java:716（`Kcp.input()`） |
-| 状态机线程安全 | 无 | 每会话 mutex（sess.go:755 `update()` 里 `s.mu.Lock()`） | 每会话 loop 亲和（读/写/定时全投同一 loop），核心零锁 | 零锁，**父子必须同 loop** | kcp/UkcpServerChannel.java:383（`run()` 驱动全部 `kcpUpdate`） |
-| 驱动 update 的调用点 | 调用方 `ikcp_update` | `SystemTimedSched` 自调度堆 | `Kcp.update()` **是死代码**（生产路径无人调用），靠 `flush()` 返回的 minrto 驱动 | 父 channel 的 `run()` 定时器 | 同左 |
+| 状态机线程安全 | 无 | 每会话 mutex（sess.go:755 `update()` 里 `s.mu.Lock()`） | 每会话 loop 亲和（读/写/定时全投同一 loop），核心零锁 | 零锁，**每会话固定归属 child loop** | kcp/UkcpServerChildChannel.java（读/写/定时/关闭均收进 child loop） |
+| 驱动 update 的调用点 | 调用方 `ikcp_update` | `SystemTimedSched` 自调度堆 | `Kcp.update()` **是死代码**（生产路径无人调用），靠 `flush()` 返回的 minrto 驱动 | 每个 child loop 的 `scheduleAtFixedRate` | 同左 |
 | 单帧段数上限 | 消息模式 128 段 | — | 同 | **127 段 ≈ 174,749 字节，超限直接抛 IOException 打死通道** | kcp/Kcp.java:548（`if (!stream && count >= IKCP_WND_RCV)`）→ kcp/Ukcp.java:100 |
 | FEC | 无 | 有（Reed-Solomon，klauspost），头 6B+2B | 有（Backblaze RS），头 8B，**与 kcp-go 兼容** | 无 | — |
 | 加密 | 无 | 包级 AES/TEA/3DES/Blowfish/Cast5/Salsa20 CFB + AEAD | 有 | 无（**不需要**：MC 包层已有 AES-CFB8） | — |

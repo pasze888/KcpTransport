@@ -24,4 +24,4 @@
 - **欠着的零件只有两件，且都在我们自己代码里，不用抄**：
   1. **开流模式去掉单帧硬上限**——`Kcp.send()` 的段数判定带 `!stream` 前置条件（kcp/Kcp.java:548），流模式下整条 127 段 / 约 174,749 字节的上限不生效；而 MC 的 `Varint21FrameDecoder` 是 `ByteToMessageDecoder`，本就是字节流语义，与流模式一致。
   2. **服务端窗口对齐客户端**——服务端 `childOption` 只设了 nodelay/interval/fastResend/nocwnd/mtu（KcpServerListener.java:83-87），没设 `UKCP_SND_WND`/`UKCP_RCV_WND`，于是沿用 vendored 默认 sndWnd=32 / rcvWnd=128（kcp/Kcp.java:74,79,138,140）；客户端是 1024/1024（KcpClientBootstrap.java:43-44）。KCP 协商取小值，服务端每 RTT 只能压 32 段 ≈ 44KB 给客户端。
-- 多线程仍是未立项状态，判据未变：先量 `kcptransport-IO` 线程 CPU 与 RTT（单 loop 长期 >70% CPU 且 RTT 随并发上升才动手）。届时候选 A（会话→loop 亲和，参考 java-kcp 的每会话 executor，保内核零锁）仍是首选；C# 四把锁与 kcp-go 每会话 mutex 已被否。
+- 多线程会话亲和已由 [ADR-0008](0008-per-session-event-loop.md) 与 #17 落地：服务端父通道只分发，child loop 驱动各自会话；生产先使用固定大小的 session loop 池。线程池大小与吞吐/RTT 的实测调优另行处理。

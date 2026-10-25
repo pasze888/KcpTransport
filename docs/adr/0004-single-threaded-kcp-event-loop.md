@@ -1,10 +1,10 @@
 # KCP 的 NioEventLoopGroup 固定单线程
 
-状态：Accepted，**将被 [ADR-0008](0008-per-session-event-loop.md) superseded**；那张决策要等 [#17](https://github.com/pasze888/KcpTransport/issues/17) 把每会话 loop 接上、[#18](https://github.com/pasze888/KcpTransport/issues/18) 实机验证通过才转正，在那之前本文仍按现状执行。
+状态：Accepted（历史约束），**将被 [ADR-0008](0008-per-session-event-loop.md) superseded**。2026-10-25，[#17](https://github.com/pasze888/KcpTransport/issues/17) 已接上服务端会话亲和并通过并发冒烟，下面的服务端单线程要求不再描述当前实现；ADR-0008 仍待 [#18](https://github.com/pasze888/KcpTransport/issues/18) 实机验证后正式转正。
 
-> 换底座后（[ADR-0007](0007-switch-base-to-java-kcp.md) 已 Accepted），下面正文给的**理由**——kcp-netty 零锁、父 channel 与 child 必须共用一条 loop——不再描述代码。线程数仍然是 1，但原因变了：外壳仍由父 channel 的 `run()` 统一驱动全部会话，每会话还没有自己的 loop（#17）。在 #17 落地前**不要去调大线程数**，断言仍在（`KcpServerListener.KCP_GROUP` 与 `KcpConcurrencySmoke`）。
+> 以下保留作历史。#17 已删除父通道统一 `run()` 和服务端线程数反射断言：父通道只做地址分发，child 的读、写、flush、关闭和定时 tick 都在其所属 loop。生产暂用一个 UDP loop + 两个会话 loop 的固定池，容量定参另做实测；客户端仍在自己的单 loop 上运行。
 
-KCP 的 `EventLoopGroup` 在服务端（`KcpServerListener`）与客户端（`KcpClientBootstrap`）各只有一处，线程数**必须**是 1。这不是调优参数，是 kcp-netty 的并发前提。
+历史实现的 `EventLoopGroup` 在服务端（`KcpServerListener`）与客户端（`KcpClientBootstrap`）各只有一处，线程数**必须**是 1。这不是调优参数，是 kcp-netty 的并发前提；#17 已由 java-kcp 会话亲和取代服务端的这条约束。
 
 kcp-netty 全层零锁：`UkcpServerChannel` 与 `Kcp` 里 `synchronized`、`ReentrantLock`、`Atomic*` 出现次数都是 0。它靠「server channel 与它的 child 共用同一个 event loop」串行化——入站 `kcpInput`/`kcpReceive`、`eventLoop().schedule` 驱动的 `kcpUpdate`、`fireChannelRead` 进子管道全在父 channel 的 loop 上。但 `UkcpServerChildChannel` 的父子只是逻辑关系，真正注册到哪个 loop 由 `ServerBootstrap` 的 childGroup 决定；多线程组下 child 的 `doWrite` 会跑在另一个 loop 上，与父 loop 的定时 `kcpUpdate` 并发改同一个 `Kcp`，`Kcp.flush` 遍历发送队列时被另一线程改动，抛 `ConcurrentModificationException`。实测表现是带 `kcp;` 前缀进服能过登录，在 configuration 阶段（大突发）断连：客户端 30s 报连接超时，服务端记 `lost connection: Disconnected`。
 
@@ -19,6 +19,5 @@ kcp-netty 全层零锁：`UkcpServerChannel` 与 `Kcp` 里 `synchronized`、`Ree
 
 ## Consequences
 
-- 所有 KCP 连接共享一个 event loop，这是明确的容量天花板（非 CPU 密集型，瓶颈在 `Kcp.flush` 与分片；实测单连接持续在线 4 分 40 秒、sn 到 5871 无异常）。容量改进另开票，不要靠调大线程数「优化」。
-- 不变式落两处，缺一不可：`KcpServerListener.KCP_GROUP` 上的注释说明为什么不能改；`smoke.KcpConcurrencySmoke` 用反射读该字段断言 `executorCount() == 1`（行为测试抓不到这类回归），外加 3 客户端 × 10 轮并发回显验证多会话复用同一 socket 不串扰。
-- 已实测该断言可变红：把线程数改成 2 后冒烟报 `found 2 threads` 并失败。
+- 历史实现的所有 KCP 连接共享一个 event loop，这是明确的容量天花板（非 CPU 密集型，瓶颈在 `Kcp.flush` 与分片；实测单连接持续在线 4 分 40 秒、sn 到 5871 无异常）。
+- 历史不变式曾由 `KcpServerListener.KCP_GROUP` 上的注释和 `smoke.KcpConcurrencySmoke` 的反射断言共同钉住；#17 已删除该反射断言，改由会话 loop 归属与同 loop 负控覆盖。
