@@ -94,10 +94,10 @@ neoForge {
             // "REGISTRYDUMP": For getting the contents of all registries.
             systemProperty 'forge.logging.markers', 'REGISTRIES'
 
-            // Recommended logging level for the console
-            // You can set various levels here.
-            // Please read: https://stackoverflow.com/questions/2031163/when-to-use-the-different-log-levels
-            logLevel = org.slf4j.event.Level.DEBUG
+            // DEBUG 会把一次启动刷成十几万字符，实机验证的关键行（监听、会话、登录）反而被
+            // 淹没；默认 INFO，排障时用 -PlogLevel=DEBUG 覆盖。
+            logLevel = org.slf4j.event.Level.valueOf(
+                    (project.findProperty('logLevel') ?: 'INFO') as String)
         }
     }
 
