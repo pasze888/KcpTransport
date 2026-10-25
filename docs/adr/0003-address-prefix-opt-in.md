@@ -1,6 +1,6 @@
 # KCP 启用走地址前缀 opt-in，不做自动协商
 
-玩家把服务器地址写成 `kcp;host:port` 才走 KCP；其余一切（含 Realms、QuickPlay、transfer、列表 ping 的传输选择）走 TCP。没有握手公告，没有探测超时，没有回退，没有每主机记忆。
+玩家把服务器地址写成 `kcp;host:port` 才走 KCP；其余一切（未带前缀的地址）走 TCP。Realms 与 transfer 的地址由别处给出、不带前缀，因此仍走 TCP；列表 ping 只剥前缀、不换传输，也走 TCP。多人 QuickPlay 在 26.3 会经 `ConnectScreen.startConnecting`，所以带前缀的 QuickPlay 地址同样走 KCP（[#18](https://github.com/pasze888/KcpTransport/issues/18) 实测）。没有握手公告，没有探测超时，没有回退，没有每主机记忆。
 
 ## Considered Options
 

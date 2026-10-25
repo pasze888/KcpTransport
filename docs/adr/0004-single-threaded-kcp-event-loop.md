@@ -1,6 +1,6 @@
 # KCP 的 NioEventLoopGroup 固定单线程
 
-状态：Accepted（历史约束），**将被 [ADR-0008](0008-per-session-event-loop.md) superseded**。2026-10-25，[#17](https://github.com/pasze888/KcpTransport/issues/17) 已接上服务端会话亲和并通过并发冒烟，下面的服务端单线程要求不再描述当前实现；ADR-0008 仍待 [#18](https://github.com/pasze888/KcpTransport/issues/18) 实机验证后正式转正。
+状态：**superseded by [ADR-0008](0008-per-session-event-loop.md)**（2026-10-25）。[#17](https://github.com/pasze888/KcpTransport/issues/17) 接上服务端会话亲和，[#18](https://github.com/pasze888/KcpTransport/issues/18) 完成实机进服验证，下面的服务端单线程要求不再描述当前实现，保留作历史。
 
 > 以下保留作历史。#17 已删除父通道统一 `run()` 和服务端线程数反射断言：父通道只做地址分发，child 的读、写、flush、关闭和定时 tick 都在其所属 loop。生产暂用一个 UDP loop + 两个会话 loop 的固定池，容量定参另做实测；客户端仍在自己的单 loop 上运行。
 

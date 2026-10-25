@@ -1,0 +1,7 @@
+[25Oct2026 10:25:22.772] [Server thread/INFO] [io.github.pasze888.kcptransport.KcpTransport/]: KCP transport listening on udp/0:0:0:0:0:0:0:0:25565
+[25Oct2026 10:25:29.982] [Server thread/INFO] [net.minecraft.server.dedicated.DedicatedServer/]: Done (7.174s)! For help, type "help"
+[25Oct2026 10:26:42.607] [kcptransport-session-3-1/INFO] [io.github.pasze888.kcptransport.KcpTransport/]: KCP session established: remote=/127.0.0.1:45773, conv=866839120
+[25Oct2026 10:26:57.520] [Server thread/INFO] [net.minecraft.server.players.PlayerList/]: Dev[/127.0.0.1:45773] logged in with entity id 9 at (5.5, 112.0, -6.5)
+[25Oct2026 10:26:57.667] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: System chat: Dev joined the game
+[25Oct2026 10:26:58.935] [Server thread/WARN] [net.minecraft.server.MinecraftServer/]: Can't keep up! Is the server overloaded? Running 2033ms or 40 ticks behind
+[25Oct2026 10:27:20.247] [Server thread/WARN] [net.minecraft.server.MinecraftServer/]: Can't keep up! Is the server overloaded? Running 6343ms or 126 ticks behind

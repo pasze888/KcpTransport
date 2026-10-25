@@ -1,6 +1,6 @@
 # 每条 KCP 会话固定归属一个 event loop
 
-状态：Proposed（2026-10-23，2026-10-25 实现更新）。对应规格 [#12](https://github.com/pasze888/KcpTransport/issues/12)。转正的门槛是「并行断言绿 + 实机带前缀进服一次」：[#17](https://github.com/pasze888/KcpTransport/issues/17) 已实现会话亲和、并发冒烟及同 loop 负控，仍欠 [#18](https://github.com/pasze888/KcpTransport/issues/18) 实机验证。通过后转 Accepted 并把 ADR-0004 标为 superseded；其服务端单线程约束已在 #17 中被本实现取代，不再作为当前配置要求。
+状态：Accepted（2026-10-23 提出，2026-10-25 转正）。对应规格 [#12](https://github.com/pasze888/KcpTransport/issues/12)。转正门槛已满足：[#17](https://github.com/pasze888/KcpTransport/issues/17) 实现会话亲和、并发断言与同 loop 负控；[#18](https://github.com/pasze888/KcpTransport/issues/18) 实机带 `kcp;` 前缀进服成功，证据见 [verification/issue-18-kcp-prefix-join.md](../verification/issue-18-kcp-prefix-join.md)。[ADR-0004](0004-single-threaded-kcp-event-loop.md) 自本条起 superseded，其服务端单线程约束不再适用。
 
 本文的前提随 [ADR-0007](0007-switch-base-to-java-kcp.md) 转 Accepted 而成立：底座把每个 `Ukcp` 的任务都收在一个 `IMessageExecutor` 接口后面。#17 已给服务端 child 接上 `NettyMessageExecutor(eventLoop())`；客户端 socket 与会话本来就共用其所属 loop，仍使用就地执行器。
 

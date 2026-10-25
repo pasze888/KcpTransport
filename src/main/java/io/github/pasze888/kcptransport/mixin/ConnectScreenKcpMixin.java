@@ -30,9 +30,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * {@code InetSocketAddress}, so the hostname may already be an IP and the key would silently
  * miss.
  *
- * <p>Only this path is touched. Realms, server transfers and QuickPlay keep their own
- * behaviour; the server-list ping only strips the prefix and stays on TCP, which is handled by
- * {@link ServerNameResolverKcpMixin}.
+ * <p>Only this path is touched, and every connect that goes through it shares the behaviour:
+ * multiplayer QuickPlay lands here too (verified in #18), so a prefixed QuickPlay address also
+ * takes KCP. Realms and server transfers carry addresses supplied elsewhere, without a prefix, so
+ * they stay on TCP. The server-list ping only strips the prefix and stays on TCP, which is handled
+ * by {@link ServerNameResolverKcpMixin}.
  */
 @Mixin(targets = "net.minecraft.client.gui.screens.ConnectScreen$1")
 public abstract class ConnectScreenKcpMixin {

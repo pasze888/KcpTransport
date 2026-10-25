@@ -299,10 +299,6 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel
         pipeline.fireChannelRead(ch);
         pipeline.fireChannelReadComplete();
 
-        if (log.isDebugEnabled()) {
-            log.debug("Create childChannel. remoteAddress={}, conv={}", remoteAddress, conv);
-        }
-
         return ch;
     }
 

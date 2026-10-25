@@ -2,7 +2,7 @@
 
 状态：Accepted（2026-10-23 提出，2026-10-25 转正）。对应规格 [#12](https://github.com/pasze888/KcpTransport/issues/12)。切片 ①（单 loop 打通既有冒烟）已落地：内核搬入 #13、两端外壳接线 #14/#15、旧底座删除 #16，七个冒烟全绿。取代 [ADR-0001](0001-vendor-kcp-netty-source.md) 与 [ADR-0006](0006-kcp-base-selection-review.md)。
 
-本文只决定「底座是哪一份」。服务端会话亲和已随 [#17](https://github.com/pasze888/KcpTransport/issues/17) 接上并通过并发冒烟；[ADR-0008](0008-per-session-event-loop.md) 尚待 #18 实机验证后转正。
+本文只决定「底座是哪一份」。服务端会话亲和已随 [#17](https://github.com/pasze888/KcpTransport/issues/17) 接上，并经 [#18](https://github.com/pasze888/KcpTransport/issues/18) 实机进服验证；[ADR-0008](0008-per-session-event-loop.md) 已转正。
 
 ADR-0006 横向复核九家实现后维持内嵌 kcp-netty，判据是「底座得在 Netty 里给出 Channel 级字节流」。这条判据现在不再成立：我们保留自己的 `Ukcp*Channel` 外壳（ADR-0002 不破），底座只需要提供**内核 + 会话层**——`Kcp` 状态机、按会话隔离的收/发队列、每会话一个 executor。kcp-netty 上游自 2023-09 停止维护，而 l42111996/java-kcp（Apache-2.0，HEAD 2026-08-12）恰好就是这个形状，它的每会话 executor 正是 ADR-0004 单线程天花板想要又造不出来的东西。
 

@@ -1,0 +1,4 @@
+[25Oct2026 10:26:38.720] [Render thread/INFO] [net.minecraft.client.gui.screens.ConnectScreen/]: Connecting to kcp;127.0.0.1, 25565
+[25Oct2026 10:26:42.029] [Server Connector #1/INFO] [io.github.pasze888.kcptransport.KcpTransport/]: Connecting to localhost/127.0.0.1:25565 over KCP (UDP)
+[25Oct2026 10:27:06.216] [Render thread/INFO] [net.minecraft.client.renderer.DynamicGpuDataStorageMapped/]: Resizing Chunk Sections Command Buffer, capacity limit of 2 reached during a single frame. New capacity will be 16.
+[25Oct2026 10:27:35.539] [Render thread/INFO] [net.minecraft.client.renderer.DynamicGpuDataStorageNonMapped/]: Resizing Chunk Sections Instanced, capacity limit of 128 reached during a single frame. New capacity will be 256.

@@ -12,6 +12,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
+import io.github.pasze888.kcptransport.KcpTransport;
 import io.github.pasze888.kcptransport.kcp.base.IKcp;
 import io.github.pasze888.kcptransport.kcp.base.KcpListener;
 import io.github.pasze888.kcptransport.kcp.base.KcpOutput;
@@ -76,6 +77,10 @@ public final class UkcpServerChildChannel extends AbstractChannel
         UkcpSessionConfig sessionConfig = config.session();
         sessionConfig.setWriteBufferSize(2 * config.getSndWnd() * config.getMtu());
         ukcp = new Ukcp(this, this, new NettyMessageExecutor(eventLoop()), sessionConfig, parent());
+        // The one place a session's remote address and adopted conv reach INFO. It appears only
+        // for KCP sessions, so it also separates them from the TCP listener's log.
+        KcpTransport.LOGGER.info("KCP session established: remote={}, conv={}",
+                remoteAddress, ukcp.getConv());
         // Run after register0 has published isRegistered(), so no first datagram can get stranded
         // between this registration and the parent's isRegistered() check in kcpRead.
         eventLoop().execute(this::drainPendingReads);

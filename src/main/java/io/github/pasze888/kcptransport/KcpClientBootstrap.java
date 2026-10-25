@@ -53,6 +53,7 @@ public final class KcpClientBootstrap {
      */
     public static ChannelFuture connect(InetSocketAddress address, EventLoopGroupHolder holder,
                                         Connection connection) {
+        KcpTransport.LOGGER.info("Connecting to {} over KCP (UDP)", address);
         Bootstrap bootstrap = new Bootstrap()
                 .group(KCP_GROUP)
                 .channel(UkcpClientChannel.class)
