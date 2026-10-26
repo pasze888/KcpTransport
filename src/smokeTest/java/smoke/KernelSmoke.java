@@ -45,9 +45,45 @@ public final class KernelSmoke {
         twoConversationsDoNotCrossTalk();
         junkIsRejectedWithoutThrowing();
         headerLayoutIsStandard();
+        singleFrameLimit();
         System.out.println("[kernel] PASS: the vendored kernel round-trips a multi-segment payload, "
-                + "keeps two conversations apart, rejects junk without throwing, and emits the "
-                + "standard 24-byte header");
+                + "keeps two conversations apart, rejects junk without throwing, emits the standard "
+                + "24-byte header, and refuses a frame one segment past the limit");
+    }
+
+    /**
+     * The single-frame limit the README quotes is a real, testable number rather than folklore:
+     * 255 segments, each at most {@link #MSS} bytes. Asserting the boundary here means a change to
+     * the kernel's segment cap breaks this test instead of quietly turning the documentation into a
+     * lie.
+     *
+     * <p>The MTU is this test's own constant, mirroring the one the production listener sets,
+     * because the kernel exposes no getter. If the deployed MTU ever moves, this assertion has to
+     * move with it -- the number is only the real limit while the two agree.
+     *
+     * <p>The return code is what matters: {@code -2} is the kernel refusing the frame outright.
+     * The channel layer turns that into an exception, and the session closes -- it is not queued
+     * and retried later.
+     */
+    private static void singleFrameLimit() {
+        int maxBytes = 255 * MSS;
+
+        int accepted = new Kcp(CONV_A, new Wire()).send(Unpooled.buffer(maxBytes).writeZero(maxBytes));
+        if (accepted < 0) {
+            throw new AssertionError("FAIL: a frame of " + maxBytes + " bytes (255 segments) was"
+                    + " refused, return code " + accepted + "; " + MSS + "-byte segments no longer"
+                    + " admit 255 of them");
+        }
+
+        int rejected = new Kcp(CONV_A, new Wire())
+                .send(Unpooled.buffer(maxBytes + 1).writeZero(maxBytes + 1));
+        if (rejected != -2) {
+            throw new AssertionError("FAIL: a frame of " + (maxBytes + 1) + " bytes (256 segments)"
+                    + " should be refused with -2, got " + rejected);
+        }
+
+        System.out.println("[kernel] single frame: " + maxBytes + " bytes accepted (255 segments), "
+                + (maxBytes + 1) + " bytes refused");
     }
 
     /** One payload spanning several segments must come out of the other side unchanged. */

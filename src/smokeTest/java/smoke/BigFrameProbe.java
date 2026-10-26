@@ -29,12 +29,14 @@ import java.util.concurrent.TimeUnit;
  * On-demand diagnostic for large KCP frames: where does the transfer stall, and what kills
  * the channel? Prints bytes written, send queue left, peer ack point and transmission counters.
  *
- * <p>Deliberately NOT wired into {@code check}: past 127 fragments it closes channels on
- * purpose, so it must never gate CI. Run it with the smoke classpath on JDK 25:
+ * <p>Deliberately NOT wired into {@code check}: past the kernel's segment cap it closes channels
+ * on purpose, so it must never gate CI. The cap is 255 segments on the vendored base (the old
+ * kcp-netty base refused at 127); {@code smokeKernel} pins the current boundary. Run it with the
+ * smoke classpath on JDK 25:
  *
  * <pre>
  * java -cp "&lt;smoke runtime classpath&gt;" \
- *      -Dprobe.sizes=100000,170000,174749,174750 -Dprobe.prime=true -Dprobe.waitMs=5000 \
+ *      -Dprobe.sizes=100000,300000,350880,350881 -Dprobe.prime=true -Dprobe.waitMs=5000 \
  *      smoke.BigFrameProbe
  * </pre>
  *
@@ -49,7 +51,7 @@ public final class BigFrameProbe {
         String[] sizesArg = System.getProperty("probe.sizes", "100000").split(",");
         boolean prime = Boolean.getBoolean("probe.prime");
         long waitMs = Long.getLong("probe.waitMs", 3000L);
-        System.out.println("[probe] MSS=" + MSS + " capAt128segs=" + (128 * MSS) + " prime=" + prime);
+        System.out.println("[probe] MSS=" + MSS + " capAt255segs=" + (255 * MSS) + " prime=" + prime);
 
         // KcpTransport: one loop, like the production listener. The kernel has no locks and keeps
         // reusable iterators, so a session must be driven by one thread only (issue #17 is the
