@@ -198,10 +198,38 @@ tasks.register('smokeKernel', JavaExec) {
     timeout = Duration.ofSeconds(90)
 }
 
+// NAT 重绑定：源端口变了但会话号不变时，会话必须活下去并让回包走到新端口（#21）。
+tasks.register('smokeRebind', JavaExec) {
+    group = 'verification'
+    description = 'Smoke test: a session follows a change of source port (NAT rebinding)'
+    classpath = sourceSets.smokeTest.runtimeClasspath
+    mainClass = 'smoke.KcpRebindSmoke'
+    // 建会话 + 一次重绑 + 3s 收 ACK，最坏约 10s；timeout 只防挂死。
+    timeout = Duration.ofSeconds(60)
+}
+
+// #21 的决策是「迁移不设冷却」。这条用机检把它钉住：实现里不许长出时间窗口。
+tasks.register('verifyNoSettlingWindow') {
+    group = 'verification'
+    description = 'Fails if session migration grows a waiting period (issue #21 decided against one)'
+    def source = file('src/main/java/io/github/pasze888/kcptransport/kcp/UkcpServerChannel.java')
+    inputs.file(source)
+    doLast {
+        def text = source.text.toLowerCase()
+        ['cooldown', 'settling window', 'grace period', 'holdoff'].each { phrase ->
+            if (text.contains(phrase)) {
+                throw new GradleException(
+                        "${source.name} mentions '${phrase}': issue #21 decided migrations take effect at once")
+            }
+        }
+    }
+}
+
 // 挂进 check。不挂的话 `gradlew build`（CI 就是这么跑的）永远不会执行它们，绿勾只证明编译通过。
 tasks.named('check') {
     dependsOn 'smokeKcp', 'smokeAddressPrefix', 'smokeClientConnection', 'smokeConcurrency',
-            'smokeHandshake', 'smokeFailureSemantics', 'smokeKernel'
+            'smokeHandshake', 'smokeFailureSemantics', 'smokeKernel', 'smokeRebind',
+            'verifyNoSettlingWindow'
 }
 
 dependencies {

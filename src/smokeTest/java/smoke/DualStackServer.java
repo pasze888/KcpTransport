@@ -92,6 +92,11 @@ final class DualStackServer implements AutoCloseable {
         return port;
     }
 
+    /** The UDP listener, so a smoke can inspect the live session table through its manager view. */
+    Channel kcpChannel() {
+        return kcp;
+    }
+
     /** Waits up to {@code timeoutSeconds} for one decoded handshake; null if none arrived. */
     ClientIntentionPacket awaitIntention(int timeoutSeconds) throws InterruptedException {
         return received.poll(timeoutSeconds, TimeUnit.SECONDS);
