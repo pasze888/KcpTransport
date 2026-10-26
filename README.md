@@ -17,6 +17,7 @@ kcp;mc.example.com:25565
 - 服务器列表的 ping 仍然走 TCP，所以列表里显示的延迟是 TCP 的；点进服务器时才换成 UDP。
 - Realms 与服务器转送留在 TCP。Realms 的地址由 Realms 自己给出，转送的地址来自服务端，两者都不带前缀——只有玩家手写的地址才可能带（见 [ADR-0003](docs/adr/0003-address-prefix-opt-in.md)）。
 - 对端没有 KCP 监听时，连接会直接失败，**不会自动退回 TCP**。这是刻意的：快速失败比等一次超时再改走 TCP 更好判断。
+- 换网络（Wi-Fi ↔ 4G、路由器重拨换端口）会让这条连接掉线，需要重连：KCP 会话跟的是远端地址（对端的 ip:port），不跟着人走（见 [ADR-0009](docs/adr/0009-rollback-session-migration.md)）。
 
 服务端不用额外配置：装了模组的服务器会在原有的 TCP 端口号上同时监听 UDP。
 
