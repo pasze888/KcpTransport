@@ -10,7 +10,8 @@
 
 ## Consequences
 
-- 客户端的 KCP 分支只挂在 `ConnectScreen` 这一个构造点（`ConnectScreenKcpMixin` 在 `<init>` 的 TAIL 置标志、在 `run()` 里 `@WrapOperation` 包 `Connection.connect`），因此**只有从多人游戏界面发起的连接才可能走 KCP**；列表 ping、Realms、QuickPlay（`QuickPlay.java:110` 走 `ConnectScreen.startConnecting` 但服务器地址来自命令行，无前缀）、服务器转送一律留在 TCP。这个「只覆盖手动连接」的边界是当前实现的既成事实，不是遗漏——后续若要覆盖转送，得先给 `ClientboundTransferPacket` 之外的路径设计前缀载体。
+- 客户端的 KCP 分支只挂在 `ConnectScreen` 这一个构造点（`ConnectScreenKcpMixin` 在 `<init>` 的 TAIL 置标志、在 `run()` 里 `@WrapOperation` 包 `Connection.connect`），因此**只有经过 `ConnectScreen` 的连接**才可能走 KCP——多人界面的手动连接，以及 26.3 里同样经 `ConnectScreen.startConnecting` 的 QuickPlay（`QuickPlay.java:110`）。**判据是地址里有没有前缀，不是连接怎么发起的**：命令行传来的地址若带前缀，QuickPlay 照样走 KCP（[#18](https://github.com/pasze888/KcpTransport/issues/18) 实测）。Realms 与服务器转送的地址由别处给出、不带前缀，列表 ping 只剥前缀不换传输，这三者留在 TCP。转送若要覆盖，得先给 `ClientboundTransferPacket` 之外的路径设计前缀载体。
+  - 2026-10-26 订正：本条原写作「只有从多人游戏界面发起的连接才可能走 KCP……这个『只覆盖手动连接』的边界是当前实现的既成事实」。那句话与 [ADR-0003](0003-address-prefix-opt-in.md) 及 #18 的实测结果冲突，且与本句自带的括号说明（QuickPlay 走 `ConnectScreen.startConnecting`）自相矛盾——既然 QuickPlay 也过 `ConnectScreen`，它就不是「手动连接」能概括的。留此记录，免得有人按旧结论理解覆盖范围。
 - 前缀必须在 DNS 之前剥掉（`ServerNameResolverKcpMixin` 在 `resolveAddress` 的 HEAD 改写入参）。ping 与 connect 都过这一个解析器，但 ping 只剥前缀、不换传输，所以**带前缀的服务器列表条目 ping 仍走 TCP**。
 - 服务端两个监听共用同一个端口号（UDP 与 TCP 是不同协议空间，数字相同不冲突）；UDP 绑定失败只记一条 warn，TCP 服务照常——模组坏了不该让服务器起不来。
 - AGENTS.md 首句原写作「把mc使用的 TCP 换成 KCP(UDP)」，读起来像整体替换，与本篇冲突，已改为「给 MC 的连接加一路 KCP 承载」。
