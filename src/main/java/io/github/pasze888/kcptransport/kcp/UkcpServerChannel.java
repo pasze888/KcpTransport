@@ -39,9 +39,13 @@ import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
 /**
- * The UDP listening channel. It owns the socket and the session tables, and routes every datagram
- * to its session: by source address on the common path, and by conv once a session has moved to a
- * new source address (NAT rebinding, issue #21).
+ * The UDP listening channel. It owns the socket and the session table, and routes every datagram
+ * to its session by source address.
+ *
+ * <p>A session does not follow its peer to a new address (issue #22 rolled back the conv index of
+ * issue #21): a peer that comes back from another port is another session. The one rebuild the
+ * server does is the one the ticket names -- the same ip:port, a conv the session does not have,
+ * and a first segment.
  *
  * <p>KcpTransport: the sessions are java-kcp's {@code kcp.base.Ukcp}, one per client, and each
  * session runs on its child channel's event loop (ADR-0008, issue #17). The conv is chosen by the
@@ -67,16 +71,12 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel
     private final DefaultUkcpServerChannelConfig config;
 
     // KcpTransport: concurrent because #17 turns each session into its own loop and they remove
-    // themselves from these tables from their own thread. On one loop it behaves like a plain map.
+    // themselves from this table from their own thread. On one loop it behaves like a plain map.
     //
-    // Two indexes over the same children (#21): the address table is the fast path that every
-    // datagram with an unchanged source takes, and the conv table is what lets a session survive a
-    // NAT rebinding -- same conv, new ip:port. createChildChannel, removeChild and the migration
-    // branch below are the only writers; nothing else may touch either map.
+    // The address table is the fast path that every datagram with an unchanged source takes, and
+    // it is the only index: #22 rolled back the conv index of #21, so a session does not follow
+    // its peer to a new address.
     private final ConcurrentHashMap<SocketAddress, UkcpServerChildChannel> childChannelMap =
-            new ConcurrentHashMap<>();
-
-    private final ConcurrentHashMap<Integer, UkcpServerChildChannel> convChannelMap =
             new ConcurrentHashMap<>();
 
     private static DatagramChannel newSocket(SelectorProvider provider) {
@@ -299,13 +299,6 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel
     private UkcpServerChildChannel createChildChannel(InetSocketAddress remoteAddress, int conv) {
         UkcpServerChildChannel ch = new UkcpServerChildChannel(this, remoteAddress, conv);
         childChannelMap.put(remoteAddress, ch);
-        // The conv is chosen by the client and is not verified, so a collision is possible. The
-        // older session keeps the index: overwriting would make a later migration move the wrong
-        // session, and the address index still serves the newcomer.
-        UkcpServerChildChannel clash = convChannelMap.putIfAbsent(conv, ch);
-        if (clash != null && clash != ch) {
-            log.warn("Two sessions share conv {}; the earlier one keeps the conv index", conv);
-        }
 
         // Firing the child through this channel's pipeline is what the bootstrap's acceptor hangs
         // off: it applies the child options (the session copies them when it is built) and
@@ -318,12 +311,12 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel
     }
 
     void removeChild(UkcpServerChildChannel childChannel) {
-        // Remove by value, not by key. This runs on the child's own loop while a migration can
-        // re-key the same entry on the parent's loop; a key read here could already be stale by
-        // the time the removal lands, and the session would stay reachable under its new address
-        // forever. Both maps are concurrent, so the value removal is safe.
+        // Remove by value, not by key. The removal runs on the child's own loop, and the entry may
+        // already have been taken over by a newer session for the same address -- a rebuild on a
+        // new conv puts that one there. A key read here could already be stale by the time the
+        // removal lands, and then the session would stay reachable under its address forever. The
+        // map is concurrent, so the value removal is safe.
         childChannelMap.values().remove(childChannel);
-        convChannelMap.values().remove(childChannel);
     }
 
     /** Routes one datagram to its session, creating the session when this is its first one. */
@@ -331,26 +324,6 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel
         ByteBuf content = packet.content();
         InetSocketAddress remoteAddress = packet.remoteAddress();
         UkcpServerChildChannel childCh = childChannelMap.get(remoteAddress);
-
-        // The session may have moved rather than appeared: same conv, new source
-        // address. ADR-0008 left this case open; #21 fixes it, and the migration is deliberately
-        // immediate -- the ticket decided against any waiting period, so a racing pair of addresses is
-        // accepted as last-writer-wins.
-        if (childCh == null && content.readableBytes() >= KCP_HEADER_SIZE) {
-            int conv = content.getIntLE(content.readerIndex() + KCP_CONV_OFFSET);
-            UkcpServerChildChannel moved = convChannelMap.get(conv);
-            if (moved != null && moved.isActive()) {
-                InetSocketAddress previous = moved.remoteAddress();
-                // Fixed order: publish the new address first, then re-key the address table, then
-                // log. Any other order leaves a window where the session is found but its replies
-                // still go to the old port.
-                moved.relocate(remoteAddress);
-                childChannelMap.remove(previous, moved);
-                childChannelMap.put(remoteAddress, moved);
-                log.info("KCP session migrated: conv={}, {} -> {}", conv, previous, remoteAddress);
-                childCh = moved;
-            }
-        }
 
         if (childCh == null) {
             // A new session has to start with a first segment (sn == 0); anything else from an
@@ -367,6 +340,28 @@ public final class UkcpServerChannel extends AbstractNioMessageChannel
             childCh = createChildChannel(remoteAddress, content.getIntLE(content.readerIndex() + KCP_CONV_OFFSET));
         } else if (!childCh.isActive()) {
             return;
+        } else if (content.readableBytes() >= KCP_HEADER_SIZE) {
+            // The address is known, but the conv is not the one this session has: this is a new
+            // conversation on the same ip:port, not this session. Only a first segment says so --
+            // a later segment with a foreign conv is not ours, and it is dropped here (the kernel
+            // would reject it with -4 anyway, but it never has to see it).
+            int conv = content.getIntLE(content.readerIndex() + KCP_CONV_OFFSET);
+            if (conv != childCh.conv()) {
+                if (content.getIntLE(content.readerIndex() + Kcp.IKCP_SN_OFFSET) != 0) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("Dropping datagram with a foreign conv from a known peer:"
+                                + " not a first segment. remoteAddress={}, conv={}", remoteAddress, conv);
+                    }
+                    return;
+                }
+                // The old session goes away and a new one takes the address. The new session is
+                // built first: it publishes itself under this address at once, so the peer never
+                // finds no session and the count never shows two. The old one's close lands on
+                // its own event loop and removes itself by value, so it cannot evict the new one.
+                UkcpServerChildChannel stale = childCh;
+                childCh = createChildChannel(remoteAddress, conv);
+                stale.close();
+            }
         }
 
         // The session takes the buffer over (ReadTask releases it after feeding the kernel), so

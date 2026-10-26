@@ -49,7 +49,7 @@ public final class UkcpServerChildChannel extends AbstractChannel
 
     private final DefaultUkcpServerChildChannelConfig config;
 
-    private volatile InetSocketAddress remoteAddress;
+    private final InetSocketAddress remoteAddress;
 
     /**
      * Built on registration, not in the constructor: {@code kcp.base.Ukcp} copies its
@@ -96,18 +96,6 @@ public final class UkcpServerChildChannel extends AbstractChannel
     @Override
     public UkcpServerChannel parent() {
         return (UkcpServerChannel) super.parent();
-    }
-
-    /**
-     * Moves this session to a new source address without rebuilding it (issue #21, NAT rebinding).
-     *
-     * <p>Only {@link UkcpServerChannel#dispatch} calls this, and only from the parent's single
-     * event loop, so the address change is published to the datagram path and to {@link #out}
-     * without any lock. Volatile is for the readers: the parent loop writes, the child loop reads
-     * when it flushes.
-     */
-    void relocate(InetSocketAddress newRemoteAddress) {
-        this.remoteAddress = newRemoteAddress;
     }
 
     @Override
@@ -280,11 +268,10 @@ public final class UkcpServerChildChannel extends AbstractChannel
 
     @Override
     public InetSocketAddress remoteAddress() {
-        // Deliberately not super.remoteAddress(): AbstractChannel caches the first value it reads
-        // and never re-reads remoteAddress0(), so after a migration the cached answer would still
-        // be the address the session was born at. Dispatch keys the address table by that answer,
-        // so the mismatch left the same session under two keys (issue #21).
-        return remoteAddress;
+        // The session does not move any more: #22 rolled back the migration of #21, so the address
+        // AbstractChannel caches on its first read is the address the session was born at, and
+        // that is the address it keeps.
+        return (InetSocketAddress) super.remoteAddress();
     }
 
     boolean isFlushPending() {
