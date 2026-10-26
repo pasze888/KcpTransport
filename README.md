@@ -1,25 +1,42 @@
+# KcpTransport
 
-Installation information
-=======
+给 Minecraft 的连接加一路 KCP（UDP）承载。原版 TCP 照旧，两条路在同一端口号上并存。
 
-This template repository can be directly cloned to get you started with a new
-mod. Simply create a new repository cloned from this one, by following the
-instructions provided by [GitHub](https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-repository-from-a-template).
+装了模组之后，玩家在服务器地址里写 `kcp;` 就走 UDP；不写前缀就还是原版 TCP。两条路的加密、压缩、包协议一模一样——只换了最底下的那条字节流通道。
 
-Once you have your clone, simply open the repository in the IDE of your choice. The usual recommendation for an IDE is either IntelliJ IDEA or Eclipse.
+## 怎么开启
 
-If at any point you are missing libraries in your IDE, or you've run into problems you can
-run `gradlew --refresh-dependencies` to refresh the local cache. `gradlew clean` to reset everything 
-{this does not affect your code} and then start the process again.
+在「多人游戏 → 添加服务器」的地址栏里加前缀：
 
-Mapping Names:
-============
-By default, the MDK is configured to use the official mapping names from Mojang for methods and fields 
-in the Minecraft codebase. These names are covered by a specific license. All modders should be aware of this
-license. For the latest license text, refer to the mapping file itself, or the reference copy here:
-https://github.com/NeoForged/NeoForm/blob/main/Mojang.md
+```
+kcp;mc.example.com:25565
+```
 
-Additional Resources: 
-==========
-Community Documentation: https://docs.neoforged.net/  
-NeoForged Discord: https://discord.neoforged.net/
+- 前缀就是 `kcp;`，分号属于前缀，必须小写。
+- **不写前缀等于完全原版行为**。没装模组的玩家、Realms、服务器之间的转送（`/transfer`）都继续走 TCP，不受影响。
+- 服务器列表的 ping 仍然走 TCP，所以列表里显示的延迟是 TCP 的；点进服务器时才换成 UDP。
+- Realms 与服务器转送留在 TCP。Realms 的地址由 Realms 自己给出，转送的地址来自服务端，两者都不带前缀——只有玩家手写的地址才可能带（见 [ADR-0003](docs/adr/0003-address-prefix-opt-in.md)）。
+- 对端没有 KCP 监听时，连接会直接失败，**不会自动退回 TCP**。这是刻意的：快速失败比等一次超时再改走 TCP 更好判断。
+
+服务端不用额外配置：装了模组的服务器会在原有的 TCP 端口号上同时监听 UDP。
+
+## 大包会怎样
+
+KCP 按段传输，一段最多 **1376 字节**（MTU 1400 减去 24 字节的 KCP 头）。一个数据包要切成若干段：
+
+- 单帧上限是 **255 段**，即 **350,880 字节**。
+- 超出上限的包**不会被排队**。内核直接拒绝它，通道随即关闭——也就是说，单帧超过约 343 KiB 会踢掉这个玩家，而不是「晚点再发」。
+- 这个数字不是估的：`smokeKernel` 每次构建都实测边界，350,880 字节通过、350,881 字节被拒。
+
+> 注意区分两道上限。「255 段」决定单帧能不能进；接收窗口（服务端部署时设为 128 段，客户端 1024 段）决定的是丢包后要等多久补齐。一帧越接近上限，丢一个段带来的停顿越明显。
+
+MC 自己的包通常远小于这个数字，只有整合包里极端的自定义 payload 才会碰到。
+
+## 更多
+
+- 为什么保留 TCP、不做纯 KCP：[ADR-0005](docs/adr/0005-dual-stack-not-pure-kcp.md)
+- 前缀为什么必须在 DNS 之前剥掉：[ADR-0003](docs/adr/0003-address-prefix-opt-in.md)
+- 底座、会话亲和、换网络不断线：[ADR-0007](docs/adr/0007-switch-base-to-java-kcp.md)、[ADR-0008](docs/adr/0008-per-session-event-loop.md)
+- 术语：[GLOSSARY.md](GLOSSARY.md)
+
+构建与验证需要 JDK 25：`./gradlew check` 会跑全部冒烟用例。
